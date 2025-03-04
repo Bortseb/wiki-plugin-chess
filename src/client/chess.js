@@ -5,9 +5,15 @@
 
 
 import { Chess } from 'chess.js'
-import { Chessboard, FEN } from 'cm-chessboard'
-import assets from './assets/pieces/standard.svg'
-import css from './chess.css'
+// import { Chessboard, FEN/*, INPUT_EVENT_TYPE, COLOR, BORDER_TYPE, PROMOTION_DIALOG_RESULT_TYPE, PromotionDialog, Accessibility*/ } from 'cm-chessboard'
+// import assets from './assets/pieces/standard.svg'
+// import css from './chess.css'
+
+import {INPUT_EVENT_TYPE, COLOR, Chessboard, BORDER_TYPE} from "cm-chessboard/src/Chessboard.js"
+import {MARKER_TYPE, Markers} from "cm-chessboard/src/extensions/markers/Markers.js"
+import {PROMOTION_DIALOG_RESULT_TYPE, PromotionDialog} from "cm-chessboard/src/extensions/promotion-dialog/PromotionDialog.js"
+import {Accessibility} from "cm-chessboard/src/extensions/accessibility/Accessibility.js"
+
 
 (function () {
 
@@ -48,7 +54,7 @@ import css from './chess.css'
     } else {
       console.log('already have chess style')
     }
-    console.log({ assets }, { css })
+    // console.log({ assets }, { css })
     return $item.append(message('loading board...'));
   };
 
@@ -101,7 +107,7 @@ import css from './chess.css'
       let pgn = await makepgn($item, cleanBeforeMakepgn(item))
       $item.find('.viewer').html(`
         <div class="diagram"></class>
-        <div id="myBoard" style="width: 350px"></div>
+        <div id="board" style="width: 350px"></div>
         <nav class="actions">
         <a href="#" data-action="download" title="Download"><img width="18" height="18" alt="download" src='data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24" viewBox="0 0 24 24" fill="grey"><g><rect fill="none" height="24" width="24"/></g><g><path d="M5,20h14v-2H5V20z M19,9h-4V3H9v6H5l7,7L19,9z"/></g></svg>'></a>
         <a href="#" data-action="zoom" title="Zoom"><img width="18" height="18" alt="toggle zoom" src='data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24" viewBox="0 0 24 24"><g><rect fill="none" height="24" width="24"/></g><g><g><g><path fill="grey" d="M15,3l2.3,2.3l-2.89,2.87l1.42,1.42L18.7,6.7L21,9V3H15z M3,9l2.3-2.3l2.87,2.89l1.42-1.42L6.7,5.3L9,3H3V9z M9,21 l-2.3-2.3l2.89-2.87l-1.42-1.42L5.3,17.3L3,15v6H9z M21,15l-2.3,2.3l-2.87-2.89l-1.42,1.42l2.89,2.87L15,21h6V15z"/></g></g></g></svg>'></a>
@@ -110,52 +116,139 @@ import css from './chess.css'
       `)
 
       const chess = new Chess()
-      const board = new Chessboard(document.getElementById("myBoard"), { position: FEN.start, assetsUrl: "/plugins/chess/assets/" })
 
-      updateStatus()
-
-      const interval = setInterval(() => { makeRandomMove() }, 100)
-
-      function makeRandomMove() {
-        if (chess.isGameOver()) {
-          clearInterval(interval)
-          return
+      let seed = 71;
+      function random() {
+        const x = Math.sin(seed++) * 10000;
+        return x - Math.floor(x);
+      }
+      function makeEngineMove(chessboard) {
+        const possibleMoves = chess.moves({ verbose: true })
+        if (possibleMoves.length > 0) {
+          const randomIndex = Math.floor(random() * possibleMoves.length)
+          const randomMove = possibleMoves[randomIndex]
+          setTimeout(() => { // smoother with 500ms delay
+            chess.move({ from: randomMove.from, to: randomMove.to })
+            chessboard.setPosition(chess.fen(), true)
+            chessboard.enableMoveInput(inputHandler, COLOR.white)
+          }, 500)
         }
-        const possibleMoves = chess.moves()
-        if (possibleMoves.length === 0) {
-          clearInterval(interval)
-          return
-        }
-        const randomIndex = Math.floor(Math.random() * possibleMoves.length)
-        chess.move(possibleMoves[randomIndex])
-        board.setPosition(chess.fen(), true)
-        updateStatus()
       }
 
-      function updateStatus() {
-        let statusHTML = ''
-
-        if (chess.isCheckmate() && chess.turn() === 'w') {
-          statusHTML = 'Game over: white is in checkmate. Black wins!'
-        } else if (chess.isCheckmate() && chess.turn() === 'b') {
-          statusHTML = 'Game over: black is in checkmate. White wins!'
-        } else if (chess.isStalemate() && chess.turn() === 'w') {
-          statusHTML = 'Game is drawn. White is stalemated.'
-        } else if (chess.isStalemate() && chess.turn() === 'b') {
-          statusHTML = 'Game is drawn. Black is stalemated.'
-        } else if (chess.isThreefoldRepetition()) {
-          statusHTML = 'Game is drawn by threefold repetition rule.'
-        } else if (chess.isInsufficientMaterial()) {
-          statusHTML = 'Game is drawn by insufficient material.'
-        } else if (chess.isDraw()) {
-          statusHTML = 'Game is drawn by fifty-move rule.'
-        } else {
-          statusHTML = 'Game is ongoing.'
+      function inputHandler(event) {
+        console.log("inputHandler", event)
+        if (event.type === INPUT_EVENT_TYPE.movingOverSquare) {
+          return // ignore this event
         }
-
-        document.getElementById('gameStatus').innerHTML = statusHTML
-        if (chess.isGameOver()) console.log(chess.pgn());
+        if (event.type !== INPUT_EVENT_TYPE.moveInputFinished) {
+          event.chessboard.removeLegalMovesMarkers()
+        }
+        if (event.type === INPUT_EVENT_TYPE.moveInputStarted) {
+          // mark legal moves
+          const moves = chess.moves({ square: event.squareFrom, verbose: true })
+          event.chessboard.addLegalMovesMarkers(moves)
+          return moves.length > 0
+        } else if (event.type === INPUT_EVENT_TYPE.validateMoveInput) {
+          const move = { from: event.squareFrom, to: event.squareTo, promotion: event.promotion }
+          const result = chess.move(move)
+          if (result) {
+            event.chessboard.state.moveInputProcess.then(() => { // wait for the move input process has finished
+              event.chessboard.setPosition(chess.fen(), true).then(() => { // update position, maybe castled and wait for animation has finished
+                makeEngineMove(event.chessboard)
+              })
+            })
+          } else {
+            // promotion?
+            let possibleMoves = chess.moves({ square: event.squareFrom, verbose: true })
+            for (const possibleMove of possibleMoves) {
+              if (possibleMove.promotion && possibleMove.to === event.squareTo) {
+                event.chessboard.showPromotionDialog(event.squareTo, COLOR.white, (result) => {
+                  console.log("promotion result", result)
+                  if (result.type === PROMOTION_DIALOG_RESULT_TYPE.pieceSelected) {
+                    chess.move({ from: event.squareFrom, to: event.squareTo, promotion: result.piece.charAt(1) })
+                    event.chessboard.setPosition(chess.fen(), true)
+                    makeEngineMove(event.chessboard)
+                  } else {
+                    // promotion canceled
+                    event.chessboard.enableMoveInput(inputHandler, COLOR.white)
+                    event.chessboard.setPosition(chess.fen(), true)
+                  }
+                })
+                return true
+              }
+            }
+          }
+          return result
+        } else if (event.type === INPUT_EVENT_TYPE.moveInputFinished) {
+          if (event.legalMove) {
+            event.chessboard.disableMoveInput()
+          }
+        }
       }
+
+      const board = new Chessboard(document.getElementById("board"), {
+        position: chess.fen(),
+        assetsUrl: "/plugins/chess/assets/",
+        style: { borderType: BORDER_TYPE.none, pieces: { file: "pieces/staunty.svg" }, animationDuration: 300 },
+        orientation: COLOR.white,
+        extensions: [
+          { class: Markers, props: { autoMarkers: MARKER_TYPE.square } },
+          { class: PromotionDialog },
+          { class: Accessibility, props: { visuallyHidden: true } }
+        ]
+      })
+      board.enableMoveInput(inputHandler, COLOR.white)
+
+
+
+
+      // const chess = new Chess()
+      // const board = new Chessboard(document.getElementById("board"), { position: FEN.start, assetsUrl: "/plugins/chess/assets/" })
+
+      // updateStatus()
+
+      // const interval = setInterval(() => { makeRandomMove() }, 100)
+
+      // function makeRandomMove() {
+      //   if (chess.isGameOver()) {
+      //     clearInterval(interval)
+      //     return
+      //   }
+      //   const possibleMoves = chess.moves()
+      //   if (possibleMoves.length === 0) {
+      //     clearInterval(interval)
+      //     return
+      //   }
+      //   const randomIndex = Math.floor(Math.random() * possibleMoves.length)
+      //   chess.move(possibleMoves[randomIndex])
+      //   board.setPosition(chess.fen(), true)
+      //   updateStatus()
+      // }
+
+      // function updateStatus() {
+      //   let statusHTML = ''
+
+      //   if (chess.isCheckmate() && chess.turn() === 'w') {
+      //     statusHTML = 'Game over: white is in checkmate. Black wins!'
+      //   } else if (chess.isCheckmate() && chess.turn() === 'b') {
+      //     statusHTML = 'Game over: black is in checkmate. White wins!'
+      //   } else if (chess.isStalemate() && chess.turn() === 'w') {
+      //     statusHTML = 'Game is drawn. White is stalemated.'
+      //   } else if (chess.isStalemate() && chess.turn() === 'b') {
+      //     statusHTML = 'Game is drawn. Black is stalemated.'
+      //   } else if (chess.isThreefoldRepetition()) {
+      //     statusHTML = 'Game is drawn by threefold repetition rule.'
+      //   } else if (chess.isInsufficientMaterial()) {
+      //     statusHTML = 'Game is drawn by insufficient material.'
+      //   } else if (chess.isDraw()) {
+      //     statusHTML = 'Game is drawn by fifty-move rule.'
+      //   } else {
+      //     statusHTML = 'Game is ongoing.'
+      //   }
+
+      //   document.getElementById('gameStatus').innerHTML = statusHTML
+      //   if (chess.isGameOver()) console.log(chess.pgn());
+      // }
 
     } catch (err) {
       console.log('makepgn', err)

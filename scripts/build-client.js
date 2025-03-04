@@ -16,11 +16,6 @@ let results = await esbuild.build({
   logLevel: 'info',
   metafile: true,
   outdir: "client/",
-  assetNames: "[dir]/[name]",
-  loader: {
-    ".svg": "file",
-    ".css": "file",
-  },
 })
 
 await fs.writeFile('meta-client.json', JSON.stringify(results.metafile))
