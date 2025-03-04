@@ -1,13 +1,9 @@
-const gitAuthors = require('grunt-git-authors')
+import gitAuthors from 'grunt-git-authors'
 
 // list of contributers from prior the split out of Smallest Federated Wiki repo.
-const priorAuthors = ['Ward Cunningham <ward@c2.com>']
-
-gitAuthors.updatePackageJson({ priorAuthors: priorAuthors, order: 'date' }, error => {
-  if (error) {
-    console.log('Error: ', error)
-  }
-})
+const priorAuthors = [
+  'Ward Cunningham <ward@c2.com>',
+]
 
 gitAuthors.updateAuthors(
   {
