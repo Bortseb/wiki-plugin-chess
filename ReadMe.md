@@ -1,6 +1,6 @@
 # Federated Wiki - Chess Plugin
 
-This plugin, type: chess, extends the markup of the federated wiki.
+This plugin enables Chess to be played over Federated Wiki.
 
 ## License
 

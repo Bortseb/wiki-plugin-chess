@@ -1,3 +1,9 @@
+// TODO change to make it a playable Game
+// TODO if item text is empty, or not able to be parsed as png, just load a fresh game against random bot, randomize who goes first
+// TODO make backwards compatible with previous notation
+// TODO if there is parseable PGN, load it... otherwise try and make sense of it to parse
+
+
 import { Chess } from 'chess.js'
 import { Chessboard, FEN } from 'cm-chessboard'
 import assets from './assets/pieces/standard.svg'
@@ -31,14 +37,18 @@ import css from './chess.css'
   }
 
   function emit($item, item) {
-
-    if (!$("link[href='/plugins/chess/chess.css']").length) {
+    if (!([...document.styleSheets].filter((e) => e.ownerNode.hasAttribute('href'))
+      .filter((e) => e.href.endsWith('/plugins/chess/chess.css')).length)) {
       console.log('adding chess style')
-      $(`<link rel="stylesheet" href="/plugins/chess/${css}" type="text/css">`).appendTo('head')
-    }else {
+      const link = document.createElement('link')
+      link.rel = 'stylesheet'
+      link.href = '/plugins/chess/chess.css'
+      link.type = 'text/css'
+      document.getElementsByTagName('head')[0].appendChild(link)
+    } else {
       console.log('already have chess style')
     }
-    console.log({assets},{css})
+    console.log({ assets }, { css })
     return $item.append(message('loading board...'));
   };
 
@@ -104,11 +114,7 @@ import css from './chess.css'
 
       updateStatus()
 
-      const interval = setInterval(() => {
-        makeRandomMove()
-        board.setPosition(chess.fen(), true)
-        updateStatus()
-      }, 100)
+      const interval = setInterval(() => { makeRandomMove() }, 100)
 
       function makeRandomMove() {
         if (chess.isGameOver()) {
@@ -122,6 +128,8 @@ import css from './chess.css'
         }
         const randomIndex = Math.floor(Math.random() * possibleMoves.length)
         chess.move(possibleMoves[randomIndex])
+        board.setPosition(chess.fen(), true)
+        updateStatus()
       }
 
       function updateStatus() {
@@ -146,6 +154,7 @@ import css from './chess.css'
         }
 
         document.getElementById('gameStatus').innerHTML = statusHTML
+        if (chess.isGameOver()) console.log(chess.pgn());
       }
 
     } catch (err) {
