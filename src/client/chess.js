@@ -185,7 +185,6 @@ import css from './chess.css'
   if (typeof window !== "undefined" && window !== null) {
     if (!window.plugins.chess) {
       window.plugins.chess = { emit, bind };
-      drawInitialized = initializeDraw()
       if (typeof window.chessListener !== "undefined"
         || window.chessListener == null) {
         console.log('**** Adding chess listener')
