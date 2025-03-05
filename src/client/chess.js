@@ -193,10 +193,6 @@ async function bind($item, item) {
     // }
   })
 
-
-
-
-
   function download(filename, text) {
     var element = document.createElement('a');
     element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
@@ -220,7 +216,6 @@ async function makePGN($item, item) {
     // console.log(text,detail)
     throw new Error(text + "\n" + detail)
   }
-
 }
 
 function chessListener(event) {
