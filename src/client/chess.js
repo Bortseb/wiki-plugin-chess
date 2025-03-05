@@ -6,7 +6,7 @@ import { Accessibility } from "cm-chessboard/src/extensions/accessibility/Access
 
 if (typeof window !== "undefined" && window !== null) {
   if (!window.plugins.chess) {
-    window.plugins.chess = { emit, bind };
+    window.plugins.chess = { emit, bind }
     if (typeof window.chessListener !== "undefined"
       || window.chessListener == null) {
       console.log('**** Adding chess listener')
@@ -151,7 +151,7 @@ async function bind($item, item) {
       }
 
       document.getElementById('gameStatus').innerHTML = statusHTML
-      if (chess.isGameOver()) console.log(chess.PGN());
+      if (chess.isGameOver()) console.log(chess.PGN())
     }
   } catch (err) {
     console.log('makePGN', err)
@@ -194,15 +194,15 @@ async function bind($item, item) {
   })
 
   function download(filename, text) {
-    var element = document.createElement('a');
-    element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
-    element.setAttribute('download', filename);
-    element.style.display = 'none';
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
+    var element = document.createElement('a')
+    element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text))
+    element.setAttribute('download', filename)
+    element.style.display = 'none'
+    document.body.appendChild(element)
+    element.click()
+    document.body.removeChild(element)
   }
-};
+}
 
 function cleanBeforeMakePGN(item) {
   // for when item text gets more complicated than just PGN
@@ -210,7 +210,7 @@ function cleanBeforeMakePGN(item) {
 }
 
 async function makePGN($item, item) {
-  return item.text; // This is the raw item text, this function need to return valid PGN
+  return item.text // This is the raw item text, this function need to return valid PGN
 
   function trouble(text, detail) {
     // console.log(text,detail)
@@ -229,7 +229,7 @@ function chessListener(event) {
   if (wiki.debug) { console.log('chessListener - ours', { event }) }
 
   const { data } = event
-  const { action, keepLineup = false, pageKey = null, title = null, context = null } = data;
+  const { action, keepLineup = false, pageKey = null, title = null, context = null } = data
 
   let $page = null
   if (pageKey != null) {
