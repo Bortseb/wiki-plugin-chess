@@ -1,6 +1,6 @@
 {
-  "name": "wiki-plugin-chess",
-  "version": "0.2.0",
+  "name": "wiki-plugin-chess2",
+  "version": "0.2.1",
   "description": "Federated Wiki - Chess Plugin",
   "type": "module",
   "keywords": [
@@ -14,11 +14,13 @@
     "email": "me@Robert.Best",
     "url": "http://Robert.Best"
   },
-  "contributors": ["Ward Cunningham <ward@c2.com>"],
+  "contributors": [
+    "Ward Cunningham <ward@c2.com>"
+  ],
   "scripts": {
-    "build": "npm run clean; node scripts/build-client.js",
-    "clean": "rm client/*",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npm run clean; npm run test; node --no-warnings scripts/build-client.js",
+    "clean": "rm client/chess.js client/chess.js.map",
+    "test": "node --test"
   },
   "dependencies": {
     "cm-chessboard": "^8.7.7",
@@ -35,12 +37,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Bortseb/wiki-plugin-chess.git"
+    "url": "git+https://github.com/Bortseb/wiki-plugin-chess.git"
   },
   "bugs": {
     "url": "https://github.com/Bortseb/wiki-plugin-chess/issues"
   },
   "engines": {
-    "node": ">=18.x"
+    "node": ">=20.x"
   }
 }
