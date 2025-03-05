@@ -48,7 +48,7 @@ function message(text) {
 async function bind($item, item) {
   try {
     const chess = new Chess()
-    let pgn = await makepgn($item, cleanBeforeMakepgn(item))
+    let PGN = await makePGN($item, cleanBeforeMakePGN(item))
     const tableTime = Date.now()
     $item.find('.table').html(`
       <div id="board-${tableTime}" class="board board-large" style="width: 400px"></div>
@@ -151,10 +151,10 @@ async function bind($item, item) {
       }
 
       document.getElementById('gameStatus').innerHTML = statusHTML
-      if (chess.isGameOver()) console.log(chess.pgn());
+      if (chess.isGameOver()) console.log(chess.PGN());
     }
   } catch (err) {
-    console.log('makepgn', err)
+    console.log('makePGN', err)
     $item.html(message(err.message))
   }
   $item.on('dblclick', () => { return wiki.textEditor($item, item) })
@@ -208,13 +208,13 @@ async function bind($item, item) {
   }
 };
 
-function cleanBeforeMakepgn(item) {
-  // for when item text gets more complicated than just pgn
+function cleanBeforeMakePGN(item) {
+  // for when item text gets more complicated than just PGN
   return item
 }
 
-async function makepgn($item, item) {
-  return item.text; // This is the raw item text, this function need to return valid pgn
+async function makePGN($item, item) {
+  return item.text; // This is the raw item text, this function need to return valid PGN
 
   function trouble(text, detail) {
     // console.log(text,detail)
