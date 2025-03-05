@@ -2,3 +2,5 @@ node_modules
 npm-debug.log
 status
 meta-client.json
+client/chess.js
+client/chess.js.map
