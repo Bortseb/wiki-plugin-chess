@@ -257,7 +257,8 @@ const expand = text => {
 
 export const chess = typeof window == 'undefined' ? { expand } : undefined
 
-// TODO change to make it a playable Game
+// TODO game stops working after first pawn promotion
+// TODO for some reason our legal move markers disappear after hover, but not on original example here https://shaack.com/projekte/cm-chessboard/examples/validate-moves.html
 // TODO if item text is empty, or not able to be parsed as png, just load a fresh game against random bot, randomize who goes first
 // TODO make backwards compatible with previous notation
 // TODO if there is parseable PGN, load it... otherwise try and make sense of it to parse
