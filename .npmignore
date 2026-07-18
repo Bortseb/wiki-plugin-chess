@@ -1,10 +1,5 @@
-coverage
-scripts
-src
-test
-meta-client.json
-eslint.config.js
-.github
-.prettier*
-.vscode
-.zed
+# Keep published npm package lean (also gated by package.json "files" whitelist).
+chess-learning-site/
+.local/
+coverage/
+*.map

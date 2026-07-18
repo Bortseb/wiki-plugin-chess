@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Lichess Shapes pieces for cm-chessboard
+Packed from Lichess per-piece SVGs for cm-chessboard usage.
+CC BY-SA 4.0 — flugsio — https://github.com/flugsio/chess_shapes
+https://github.com/lichess-org/lila/tree/master/public/piece/shapes
+-->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="40" viewBox="0 0 40 40">
+    <title>Lichess Shapes pieces for cm-chessboard</title>
+    <g id="wk" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wk-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" fill-rule="evenodd" stroke="#000" stroke-linejoin="round" stroke-width="6" d="M68.79 24.64 24.64 68.8v62.42l44.15 44.15h62.42l44.15-44.15V68.8L131.2 24.64zM88 67.86h24V88h20.14v24H112v20.14H88V112H67.86V88H88z" filter="url(#shapes-wk-a)"/>
+    </g>
+    <g id="wq" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wq-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M80 20v31.71L57.57 29.3 29.3 57.57 51.72 80H20v40h31.71L29.3 142.43l28.28 28.28L80 148.28V180h40v-31.71l22.43 22.42 28.28-28.28L148.28 120H180V80h-31.71l22.42-22.43-28.28-28.28L120 51.72V20zm20 58.03A21.97 21.97 0 0 1 121.97 100 21.97 21.97 0 0 1 100 121.97 21.97 21.97 0 0 1 78.03 100 21.97 21.97 0 0 1 100 78.03z" filter="url(#shapes-wq-a)"/>
+    </g>
+    <g id="wr" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wr-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M75 15h50v60h60v50h-60v60H75v-60H15V75h60z" filter="url(#shapes-wr-a)"/>
+    </g>
+    <g id="wb" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wb-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M68.79 40.5 100 71.72l31.21-31.22 35.36-7.07-7.07 35.36L128.28 100l31.22 31.21 7.07 35.36-35.36-7.07L100 128.28 68.79 159.5l-35.36 7.07 7.07-35.36L71.72 100 40.5 68.79l-7.07-35.36z" filter="url(#shapes-wb-a)"/>
+    </g>
+    <g id="wn" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wn-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M35.5 122.84V79.56l112.67-46.5 15.26 36.97-75.51 31.17 75.51 31.17-15.26 36.98z" filter="url(#shapes-wn-a)"/>
+    </g>
+    <g id="wp" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-wp-a" width="150%" height="150%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="4.5" dy="4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#fff" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M40 40v120h120V40zm40 40h40v40H80z" filter="url(#shapes-wp-a)" transform="matrix(.9 0 0 .9 11.8 11.8)"/>
+    </g>
+    <g id="bk" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-bk-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" fill-rule="evenodd" stroke="#000" stroke-linejoin="round" stroke-width="6" d="M68.79 24.64 24.64 68.8v62.42l44.15 44.15h62.42l44.15-44.15V68.8L131.2 24.64zM88 67.86h24V88h20.14v24H112v20.14H88V112H67.86V88H88z" filter="url(#shapes-bk-a)"/>
+    </g>
+    <g id="bq" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-bq-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M80 20v31.71L57.57 29.3 29.3 57.57 51.72 80H20v40h31.71L29.3 142.43l28.28 28.28L80 148.28V180h40v-31.71l22.43 22.42 28.28-28.28L148.28 120H180V80h-31.71l22.42-22.43-28.28-28.28L120 51.72V20zm20 58.03A21.97 21.97 0 0 1 121.97 100 21.97 21.97 0 0 1 100 121.97 21.97 21.97 0 0 1 78.03 100 21.97 21.97 0 0 1 100 78.03z" filter="url(#shapes-bq-a)"/>
+    </g>
+    <g id="br" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-br-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M75 15h50v60h60v50h-60v60H75v-60H15V75h60z" filter="url(#shapes-br-a)"/>
+    </g>
+    <g id="bb" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-bb-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M68.79 40.5 100 71.72l31.21-31.22 35.36-7.07-7.07 35.36L128.28 100l31.22 31.21 7.07 35.36-35.36-7.07L100 128.28 68.79 159.5l-35.36 7.07 7.07-35.36L71.72 100 40.5 68.79l-7.07-35.36z" filter="url(#shapes-bb-a)"/>
+    </g>
+    <g id="bn" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-bn-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" fill-rule="evenodd" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M35.5 122.84V79.56l112.67-46.5 15.26 36.97-75.51 31.17 75.51 31.17-15.26 36.98z" filter="url(#shapes-bn-a)"/>
+    </g>
+    <g id="bp" transform="matrix(0.18,0,0,0.18,2.0,2.0)">
+<filter id="shapes-bp-a" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceAlpha" result="blur" stdDeviation="3"/><feColorMatrix in="blur" result="blurAlpha" values="2 0 0 0 0 0 2 0 0 0 0 0 2 0 0 0 0 0 0.5 0"/><feOffset dx="-4.5" dy="-4.5" in="blurAlpha" result="offsetBlur"/><feBlend in="SourceGraphic" in2="offsetBlur"/></filter><path fill="#333" stroke="#000" stroke-linejoin="bevel" stroke-width="6" d="M40 40v120h120V40zm40 40h40v40H80z" filter="url(#shapes-bp-a)" transform="matrix(.9 0 0 .9 11.8 11.8)"/>
+    </g>
+</svg>

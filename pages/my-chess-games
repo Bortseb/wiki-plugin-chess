@@ -1,0 +1,15 @@
+{
+  "title": "My Chess Games",
+  "story": [
+    {
+      "type": "paragraph",
+      "id": "913c9902ba83800a",
+      "text": "A survey of all your active and completed chess games, as well as open challenges."
+    },
+    {
+      "type": "chess",
+      "id": "2f7412bc39cdfc1f",
+      "text": "SURVEY"
+    }
+  ]
+}

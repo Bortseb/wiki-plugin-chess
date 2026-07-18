@@ -1,5 +1,7 @@
 {
   "name": "Chess",
   "title": "Chess Plugin",
-  "category": "other"
+  "category": "other",
+  "editor": true,
+  "pages": ["My Chess Games", "Chess Leaderboards"]
 }

@@ -1,405 +1,2489 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-bs-theme="auto">
+  <head>
+    <title>Federated Wiki Chess</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, user-scalable=yes, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <meta name="theme-color" content="#99DAFF" />
+    <link rel="manifest" href="/plugins/chess/manifest.json" id="wiki-chess-manifest" />
+    <link rel="icon" href="icon-120.png" id="wiki-chess-favicon" />
+    <script>
+      // Apply saved Bootstrap color mode before paint (FOUC). chess-app.js owns the toggle.
+      ;(function () {
+        var key = 'wiki-chess-color-theme'
+        var pref = 'auto'
+        try {
+          var raw = localStorage.getItem(key)
+          if (raw != null) {
+            try {
+              pref = JSON.parse(raw)
+            } catch (_) {
+              pref = raw
+            }
+          }
+        } catch (_) {
+          /* private mode */
+        }
+        pref = String(pref || 'auto')
+          .trim()
+          .toLowerCase()
+        if (pref !== 'light' && pref !== 'dark' && pref !== 'auto') pref = 'auto'
+        var resolved =
+          pref === 'light' || pref === 'dark'
+            ? pref
+            : window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+        document.documentElement.setAttribute('data-bs-theme', resolved)
+        document.documentElement.setAttribute('data-wiki-color-theme', pref)
+        var meta = document.querySelector('meta[name="theme-color"]')
+        if (meta) meta.setAttribute('content', resolved === 'dark' ? '#212529' : '#99DAFF')
+      })()
+    </script>
+    <script>
+      // Chrome needs HTTP manifest + a controlling service worker for the install icon.
+      ;(function () {
+        if (window.parent !== window.self) return
+        if (!('serviceWorker' in navigator)) return
 
-<head>
-  <title>Federated Wiki Chess</title>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, user-scalable=yes, initial-scale=1.0" />
-  <meta http-equiv="X-UA-Compatible" content="ie=edge" />
-  <link rel="stylesheet" href="./assets/styles/all.min.css" />
-  <link rel="stylesheet" href="./assets/styles/screen.css" />
-  <link rel="icon" href="icon-120.png" />
-  <link rel="manifest" href="manifest.json" />
-  <style>
-    .page {
-      display: none;
-    }
-  </style>
-</head>
+        var reloadKey = 'wiki-chess-sw-ready-reload'
+        var reloadPath = location.pathname + location.search
 
-<body>
-  <!-- GAME Page -->
-  <div class="page container" id="game">
-    <div class="container-fluid">
-      <div id="console-container" class="mb-3">
-        <div class="row chess-console">
-          <div class="chess-console-center col-xl-7 order-xl-2 col-lg-8 order-lg-1 order-md-1 col-md-12">
-            <div class="chess-console-board"></div>
-          </div>
-          <div class="chess-console-right col-xl-3 order-xl-3 col-lg-4 order-lg-2 col-md-8 order-md-3">
-            <div class="control-buttons buttons-grid mb-4"></div>
-            <div class="chess-console-notifications mb-4"></div>
-            <div class="engine-state mb-4"></div>
-          </div>
-          <div class="chess-console-left col-xl-2 order-xl-1 order-lg-3 col-lg-12 col-md-4 order-md-2">
-            <div class="row">
-              <div class="col-xl-12 col-lg-4 col-md-12 col-6">
-                <div class="chess-console-history"></div>
-              </div>
-              <div class="col-xl-12 col-lg-8 col-md-12 col-6">
-                <div class="chess-console-captured"></div>
-              </div>
-            </div>
-          </div>
+        function reloadOnceForController() {
+          if (navigator.serviceWorker.controller) return
+          if (sessionStorage.getItem(reloadKey) === reloadPath) return
+          sessionStorage.setItem(reloadKey, reloadPath)
+          location.reload()
+        }
+
+        navigator.serviceWorker
+          .register('/plugins/chess/service-worker.js', { scope: '/plugins/chess/' })
+          .then(function () {
+            return navigator.serviceWorker.ready
+          })
+          .then(function () {
+            if (navigator.serviceWorker.controller) {
+              sessionStorage.removeItem(reloadKey)
+              return
+            }
+            reloadOnceForController()
+          })
+          .catch(function (err) {
+            console.warn('wiki-chess: service worker registration failed', err)
+          })
+      })()
+    </script>
+    <style>
+      #wiki-chess-loading {
+        margin: 0;
+        padding: 1.25rem 1rem;
+        text-align: center;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          sans-serif;
+        font-size: 0.95rem;
+        line-height: 1.45;
+        color: #495057;
+        background: #f8f9fa;
+        min-height: 10rem;
+      }
+      #wiki-chess-loading[hidden] {
+        display: none !important;
+      }
+      .wiki-chess-loading-title {
+        margin: 0 0 0.35rem;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      .wiki-chess-loading-status {
+        margin: 0;
+        color: #6c757d;
+      }
+      .page {
+        display: none;
+      }
+    </style>
+    <link rel="stylesheet" href="./assets/styles/all.min.css" />
+    <link rel="stylesheet" href="./assets/styles/cm-modules.css?v=1.1.2-pre.15+1784363678514" />
+    <link rel="stylesheet" href="./assets/styles/wiki-chess.css?v=1.1.2-pre.15+1784363678514" />
+    <script type="module">
+      // Early PWA boot: protocol guard and install nudge (standalone shell only).
+      if (window.parent === window.self) {
+        // Keep in sync with isLoopbackWikiHost in src/chess-core.js (localhost, *.local, RFC1918).
+        const isLocalDevHost = h => {
+          const host = String(h || '')
+            .trim()
+            .toLowerCase()
+          if (!host) return false
+          if (host === 'localhost' || host === '::1') return true
+          if (/\.(localhost|local)$/i.test(host)) return true
+          if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true
+          if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true
+          if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true
+          if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)) return true
+          if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host)) return true
+          return false
+        }
+        const { hostname, protocol, href } = location
+        let navigating = false
+        if (isLocalDevHost(hostname) && protocol === 'https:') {
+          location.replace(href.replace(/^https:/i, 'http:'))
+          navigating = true
+        } else if (!isLocalDevHost(hostname) && protocol === 'http:') {
+          location.protocol = 'https:'
+          navigating = true
+        }
+
+        if (navigating) {
+          /* page is reloading — skip install nudge */
+        } else {
+          try {
+            const installNudge = document.querySelector('#install-nudge')
+            if (installNudge && localStorage.getItem('wiki-chess-pwa-installed:' + location.origin) === 'true') {
+              installNudge.style.display = 'none'
+            }
+          } catch {
+            /* localStorage can be unavailable */
+          }
+
+          if (screen.orientation) {
+            function showOrientationBlocks() {
+              const portrait =
+                screen.orientation.type === 'portrait-primary' || screen.orientation.type === 'portrait-secondary'
+              document.querySelectorAll('.show-for-portrait').forEach(el => {
+                el.style.display = portrait ? 'block' : 'none'
+              })
+              document.querySelectorAll('.show-for-landscape').forEach(el => {
+                el.style.display = portrait ? 'none' : 'block'
+              })
+            }
+            screen.orientation.addEventListener('change', showOrientationBlocks)
+            showOrientationBlocks()
+          }
+        }
+      }
+    </script>
+    <script>
+      // Host-specific window title; manifest is applied above before first paint.
+      ;(function () {
+        var host = location.host
+        if (!host) return
+
+        var fullName = 'Federated Wiki Chess (' + host + ')'
+        document.title = fullName
+        document.addEventListener(
+          'DOMContentLoaded',
+          function () {
+            var loadingTitle = document.querySelector('.wiki-chess-loading-title')
+            if (loadingTitle) loadingTitle.textContent = fullName
+          },
+          { once: true },
+        )
+      })()
+    </script>
+  </head>
+
+  <body>
+    <!-- Icon-only color mode control — visible in every mode, never inside a modal. -->
+    <button
+      type="button"
+      id="wikiChessThemeToggle"
+      class="btn btn-sm btn-outline-secondary wiki-chess-theme-toggle"
+      aria-label="Color theme"
+      title="Color theme">
+      <i class="fas fa-adjust fa-fw wiki-chess-theme-toggle-icon" aria-hidden="true"></i>
+    </button>
+    <!-- PWA install nudge: browser chrome only (address-bar icon or ⋮ menu). Hidden once installed. -->
+    <div id="install-nudge" class="wiki-chess-install-nudge" role="status" aria-live="polite">
+      <div class="wiki-chess-install-nudge-inner">
+        <p class="wiki-chess-install-nudge-text mb-0">
+          Install <strong>Federated Wiki Chess</strong> for offline play. Use the install icon in the address bar, or
+          <strong>Install</strong> in the browser menu (⋮).
+        </p>
+      </div>
+      <button
+        type="button"
+        id="close-button"
+        class="btn-close wiki-chess-install-nudge-close"
+        aria-label="Dismiss install hint"></button>
+    </div>
+    <!-- Cross-mode offline puzzle download status (puzzle.js); visible while a download/index runs. -->
+    <div id="puzzle-local-download-float" class="wiki-puzzle-download-float" role="status" aria-live="polite" hidden>
+      <p class="wiki-puzzle-download-float-msg mb-0" id="puzzle-local-download-float-msg"></p>
+    </div>
+    <!-- Markup for chess-app.js (orchestrator), survey.js (#leaderboard),
+       and choose-menu.js (#start). Board widgets come from cm-modules-bundle.js. -->
+    <div id="wiki-chess-loading" class="wiki-chess-loading" role="status" aria-live="polite">
+      <p class="wiki-chess-loading-title">Federated Wiki Chess</p>
+      <p class="wiki-chess-loading-status">Loading…</p>
+    </div>
+    <!-- Installed PWA: wiki page chrome while naming/creating a page in the background
+       (open-challenge join or CHOOSE-menu game/position/puzzle — chess-app.js). -->
+    <div class="container wiki-chess-pwa-page-chrome-page" id="wikiChessPwaPageChromePage" hidden>
+      <div id="wikiChessPwaPageChrome" class="wiki-chess-pwa-page-chrome">
+        <div class="wiki-chess-pwa-page-head">
+          <label for="wikiChessPwaPageTitle" class="visually-hidden">Wiki page title</label>
+          <input
+            type="text"
+            id="wikiChessPwaPageTitle"
+            class="form-control wiki-chess-pwa-page-title"
+            autocomplete="off"
+            spellcheck="false" />
+          <a id="wikiChessPwaPageTitleLink" class="wiki-chess-pwa-page-title-link" href="#" target="_blank" hidden></a>
+        </div>
+        <p class="wiki-chess-pwa-page-lead text-muted" id="wikiChessPwaPageLead" hidden></p>
+        <p class="wiki-chess-pwa-page-status" id="wikiChessPwaPageStatus" aria-live="polite" hidden></p>
+        <div class="wiki-chess-pwa-page-actions" id="wikiChessPwaPageActions" hidden>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+            id="wikiChessPwaSaveToWikiBtn"
+            hidden>
+            <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save to wiki
+          </button>
         </div>
       </div>
-      <button id="sendMsg" class="btn btn-outline-primary mb-4" type="button">Send Msg</button>
-      <form>
-        <div class="input-group mb-4">
-          <label for="fenInput" class="sr-only">FEN</label>
-          <div class="input-group-prepend">
-            <button id="fenButton" class="btn btn-outline-primary" type="button">Init with FEN</button>
-          </div>
-          <input id="fenInput" class="form-control" placeholder="FEN" value="4k2r/1P4P1/8/8/8/8/1p1N4/4K3 w - - 0 1" />
-        </div>
-      </form>
-      Chess-Console code license: <a href="https://github.com/shaack/chess-console/blob/master/LICENSE" target="_blank">MIT</a>. <br />
-      License for the Sounds: <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY 4.0</a>.
-      <br />
-      License of the SVG pieces <a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank">CC BY-SA
-        3.0</a>.
-      </p>
     </div>
-  </div>
-
-  <!-- POSITION Page -->
-  <div class="page container" id="position">
-    <div class="container-fluid max-width-xxl">
-      <br />
-      <div class="cm-fen-editor">
-        <div class="form-group row mb-3 g-3">
-          <label for="fenInputOutput" class="col-auto col-form-label d-none d-md-block">FEN</label>
-          <div class="col">
-            <div class="input-group">
-              <input type="text" class="form-control fen-input-output" id="fenInputOutput">
-              <button class="btn btn-outline-secondary" type="button" id="copyFenBtn" title="Copy FEN">
-                <i class="fas fa-copy"></i>
+    <!-- START Page: choose activity when item has no chess data yet -->
+    <div class="page container" id="start">
+      <div class="container-fluid py-3">
+        <div class="wiki-start-choose-menu" id="start-choose-menu">
+          <div class="col-md-8">
+            <h2 class="wiki-start-choose-heading h5 mb-3">Federated Wiki Chess</h2>
+            <div class="wiki-chess-start-actions">
+              <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn wiki-start-game">
+                <i class="fas fa-chess-knight fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Play New Game</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn wiki-start-position">
+                <i class="fas fa-chess-board fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Set Up a Position</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn wiki-start-puzzle">
+                <i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Chess Puzzle</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn wiki-start-my-games">
+                <i class="fas fa-list fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">My Chess Games</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn wiki-start-leaderboard">
+                <i class="fas fa-trophy fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Leaderboards</span>
+              </button>
+            </div>
+            <p class="wiki-start-choose-tip mt-4 mb-0 text-muted">
+              Tip: You can paste PGN, FEN, or figurine notation here or in the item text, to load a game/position
+              directly.
+            </p>
+            <div class="wiki-start-cancel-row mt-4" hidden>
+              <button type="button" class="btn btn-sm btn-danger wiki-start-cancel">
+                <i class="fas fa-times fa-fw" aria-hidden="true"></i> Cancel
               </button>
             </div>
           </div>
-          <div class="col-auto">
-            <label for="positionSetUp" class="visually-hidden">Position setups</label>
-            <select class="form-select fen-select" id="positionSetUp">
-              <option disabled value=""></option>
-              <option value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
-                Starting Position
-              </option>
-              <option value="4k3/8/8/8/8/8/8/4K3 w - - 0 1">Kings Only</option>
-              <option value="4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1">Kings and Pawns</option>
-              <option value="8/8/8/8/8/8/8/8 w - - 0 1">Empty Board</option>
-            </select>
-          </div>
         </div>
-        <div class="row">
-          <div class="col-xl-7 col-md-7 mb-3">
-            <div class="chessboard"></div>
-          </div>
-          <div class="col-xl-5 col-md-5">
-            <div class="card conditions-inputs mb-3">
-              <div class="card-header p-3">
-                <div class="form-group mb-3">
-                  <label for="colorToPlay" class="visually-hidden">Color to play</label>
-                  <select class="form-select color-to-play" id="colorToPlay">
-                    <option value="w">White to play</option>
-                    <option value="b">Black to play</option>
-                  </select>
+        <div id="start-submenu" class="wiki-start-submenu"></div>
+      </div>
+    </div>
+
+    <!-- GAME Page -->
+    <div class="page container" id="game">
+      <div class="container-fluid">
+        <div id="console-container" class="mb-3">
+          <div class="wiki-chess-sticky">
+            <div class="row chess-console">
+              <div class="chess-console-center col-xl-7 order-xl-2 col-lg-8 order-lg-1 order-md-1 col-md-12">
+                <!-- Board + open-challenge overlay. The banner floats over the centre of
+                   the board (filled by chess-app.js) so advertising a seek never grows
+                   the item. It is a sibling of .chess-console-board so resetChessApp's
+                   innerHTML wipe of the board doesn't remove it. -->
+                <div class="chess-console-board-wrap">
+                  <div class="chess-console-board"></div>
+                  <div id="wikiChessChallengeBanner" class="wiki-chess-challenge-banner" hidden></div>
+                  <button
+                    type="button"
+                    id="wikiChessRealtimeBadge"
+                    class="wiki-chess-realtime-badge"
+                    hidden
+                    aria-live="polite"
+                    title="Real-time play is active — click to end">
+                    <i class="fas fa-bolt fa-fw" aria-hidden="true"></i>
+                    <span class="wiki-chess-realtime-badge-label"></span>
+                  </button>
                 </div>
-                <p class="mb-2">Allowed castling</p>
-                <div class="row">
-                  <div class="col-6 col-md-12 col-lg-6">
-                    <div class="">
-                      <input type="checkbox" name="castling" class="checkbox-castle checkbox-castle-wk" id="castle-wk" value="K">
-                      <label class="custom-control-label" for="castle-wk">White O-O</label>
+                <!-- Move/nav controls stay directly under the board on every layout (they
+                   never shift to the side column like History &amp; Captured Pieces). -->
+                <div class="wiki-chess-controls">
+                  <div class="control-buttons buttons-grid mb-2"></div>
+                  <div class="wiki-chess-move-confirm mb-2" hidden>
+                    <button
+                      type="button"
+                      class="wiki-chess-move-cancel"
+                      aria-label="Take back move"
+                      title="Take back move">
+                      <i class="fas fa-times" aria-hidden="true"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="wiki-chess-move-confirm-ok"
+                      aria-label="Confirm move"
+                      title="Confirm move">
+                      <i class="fas fa-check" aria-hidden="true"></i>
+                    </button>
+                  </div>
+                  <div class="wiki-chess-annotation" id="wikiChessAnnotation" hidden>
+                    <div class="wiki-chess-annotation-text" id="wikiChessAnnotationText"></div>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-outline-primary wiki-chess-annotation-add"
+                      id="addCommentBtn"
+                      title="Add a comment to the selected move">
+                      <i class="fas fa-comment-dots fa-fw" aria-hidden="true"></i> Add Comment
+                    </button>
+                  </div>
+                </div>
+                <!-- Major game-event banner (check/checkmate/stalemate) sits directly
+                   under the move controls, above the History &amp; Captured drawer. -->
+                <div class="chess-console-notifications wiki-chess-game-state"></div>
+                <!-- Final-result banner: shown for any completed game (decisive or drawn),
+                   describing the outcome and how it ended (checkmate, resignation, draw…).
+                   Filled by chess-app.js (updateResultBanner); hidden while a game is live. -->
+                <div
+                  id="wikiChessResultBanner"
+                  class="wiki-chess-result-banner"
+                  role="status"
+                  aria-live="polite"
+                  hidden></div>
+                <!-- Async-play finalize: when the game ends on a page the player can't
+                   autosave, this stamps the rating result and writes it to their wiki.
+                   Shown/hidden by survey.js. -->
+                <button
+                  id="wiki-chess-finalize"
+                  type="button"
+                  class="btn btn-primary btn-sm wiki-chess-finalize"
+                  hidden
+                  aria-hidden="true">
+                  <i class="fas fa-flag-checkered fa-fw" aria-hidden="true"></i>
+                  Finalize rated result
+                </button>
+              </div>
+              <div class="chess-console-right col-xl-3 order-xl-3 col-lg-4 order-lg-2 col-md-8 order-md-3">
+                <!-- Collapsible game panel: history, captures, action buttons, settings,
+                   attributions. The header always reads "Controls:" (sitting over the move
+                   history when expanded; nested Game settings / Attributions chevrons
+                   indent under it). Collapsed, the captured pieces strip appears
+                   right-aligned with its "Captured Pieces" heading above the piece rows,
+                   mirroring the expanded panel. -->
+                <details class="wiki-chess-drawer wiki-chess-history-drawer wiki-chess-game-controls-drawer" open>
+                  <summary>
+                    <span class="wiki-chess-game-controls-summary-label">Controls:</span>
+                    <span class="wiki-chess-game-controls-summary-collapsed">
+                      <span class="wiki-chess-captured-group">
+                        <span class="wiki-chess-captured-label">Captured Pieces</span>
+                        <span class="wiki-chess-captured-summary" aria-live="polite"></span>
+                      </span>
+                    </span>
+                  </summary>
+                  <div class="wiki-chess-history-drawer-body">
+                    <div class="chess-console-left">
+                      <div class="row g-2 wiki-chess-history-captured-row">
+                        <div class="col-6">
+                          <h3 class="wiki-history-heading">Move History</h3>
+                          <div class="wiki-chess-history-scroll">
+                            <div class="chess-console-history"></div>
+                          </div>
+                        </div>
+                        <div class="col-6">
+                          <div class="wiki-chess-captured-scroll">
+                            <div class="chess-console-captured"></div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <div class="">
-                      <input type="checkbox" name="castling" class="checkbox-castle checkbox-castle-wq" id="castle-wq" value="Q">
-                      <label class="custom-control-label" for="castle-wq">White O-O-O</label>
+                    <div class="wiki-chess-below-chrome">
+                      <div class="wiki-chess-footer">
+              <div class="wiki-chess-actions">
+                <div class="wiki-chess-nav-actions d-none">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
+                    id="wikiChessMyGamesNav"
+                    title="Open your My Chess Games page in the wiki">
+                    <i class="fas fa-list fa-fw" aria-hidden="true"></i> My Chess Games
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="chooseModeBtn"
+                    title="Return to the game mode menu">
+                    <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="editPositionBtn"
+                    title="Open the position editor for the current board">
+                    <i class="fas fa-pen fa-fw" aria-hidden="true"></i> Edit This Position
+                  </button>
+                  <!-- Resign the live game: only shown for an in-progress game the local player
+               holds a seat in (toggled by updateResignControl). Opens a confirm modal. -->
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-danger wiki-chess-action-btn d-none"
+                    id="resignGameBtn"
+                    title="Resign this game">
+                    <i class="fas fa-flag fa-fw" aria-hidden="true"></i> Resign
+                  </button>
+                </div>
+                <div class="wiki-chess-copy-actions">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="copyGameFenBtn"
+                    title="Copy current FEN to clipboard">
+                    <i class="fas fa-copy fa-fw" aria-hidden="true"></i> Copy FEN Position
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="copyGamePgnBtn"
+                    title="Copy game PGN to clipboard">
+                    <i class="fas fa-copy fa-fw" aria-hidden="true"></i> Copy Game PGN
+                  </button>
+                </div>
+                <div class="wiki-chess-share-actions d-none" id="wikiChessShareActions">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="shareGamePgnBtn"
+                    title="Share game PGN">
+                    <i class="fas fa-share-alt fa-fw" aria-hidden="true"></i> Share PGN
+                  </button>
+                </div>
+              </div>
+              <details class="wiki-chess-drawer wiki-chess-game-settings-drawer" id="wikiChessGameSettings" hidden>
+                <summary>Game settings</summary>
+                <div class="wiki-chess-game-settings-body">
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="settingConfirmMoves" />
+                    <label class="form-check-label" for="settingConfirmMoves">Confirm each move before playing</label>
+                  </div>
+                  <fieldset class="wiki-chess-flip-mode mb-0" id="settingSameDeviceFlipModeGroup">
+                    <legend class="wiki-chess-flip-mode-legend" id="settingSameDeviceFlipModeLabel">
+                      After each move (same device)
+                    </legend>
+                    <p class="wiki-chess-flip-mode-hint form-text mb-2">
+                      Pick one — flip the board, flip the pieces, or keep both fixed.
+                    </p>
+                    <div class="form-check mb-0">
+                      <input
+                        class="form-check-input"
+                        type="radio"
+                        name="settingSameDeviceFlipMode"
+                        id="settingSameDeviceFlipNone"
+                        value="none" />
+                      <label class="form-check-label" for="settingSameDeviceFlipNone"
+                        >Don't flip — board and pieces stay fixed</label
+                      >
+                    </div>
+                    <div class="form-check mb-0 mt-2">
+                      <input
+                        class="form-check-input"
+                        type="radio"
+                        name="settingSameDeviceFlipMode"
+                        id="settingSameDeviceFlip"
+                        value="board" />
+                      <label class="form-check-label" for="settingSameDeviceFlip"
+                        >Pass-and-play — flip the board</label
+                      >
+                    </div>
+                    <div class="form-check mb-0 mt-2">
+                      <input
+                        class="form-check-input"
+                        type="radio"
+                        name="settingSameDeviceFlipMode"
+                        id="settingSameDeviceFlipPieces"
+                        value="pieces" />
+                      <label class="form-check-label" for="settingSameDeviceFlipPieces"
+                        >Opposite sides — flip pieces (board stays put)</label
+                      >
+                    </div>
+                  </fieldset>
+                  <div class="form-check mb-0 mt-2" id="settingAutoAcceptRemoteRow" hidden>
+                    <input class="form-check-input" type="checkbox" id="settingAutoAcceptRemote" />
+                    <label class="form-check-label" for="settingAutoAcceptRemote"
+                      >Auto-fork opponent moves into wiki</label
+                    >
+                    <div class="form-check mb-0 mt-2 ms-3" id="settingAutoAcceptRemoteEndRow" hidden>
+                      <input class="form-check-input" type="checkbox" id="settingAutoAcceptRemoteEnd" />
+                      <label class="form-check-label" for="settingAutoAcceptRemoteEnd"
+                        >Auto-fork game endings into wiki</label
+                      >
+                    </div>
+                    <div class="form-check mb-0 mt-2 ms-3" id="settingAutoAcceptRealtimeRow" hidden>
+                      <input class="form-check-input" type="checkbox" id="settingAutoAcceptRealtime" />
+                      <label class="form-check-label" for="settingAutoAcceptRealtime">Auto-accept real-time play</label>
+                    </div>
+                    <div class="form-text wiki-chess-realtime-status" id="wikiChessRealtimeStatus" hidden></div>
+                  </div>
+                  <div class="form-check mb-0 mt-2">
+                    <input class="form-check-input" type="checkbox" id="settingMuteMoveSounds" />
+                    <label class="form-check-label" for="settingMuteMoveSounds">Mute move sounds</label>
+                  </div>
+                  <div class="form-check mb-0 mt-2">
+                    <input class="form-check-input" type="checkbox" id="settingShowAnnotationsBelow" />
+                    <label class="form-check-label" for="settingShowAnnotationsBelow"
+                      >Show move annotations below the board</label
+                    >
+                  </div>
+                  <div class="form-check mb-0 mt-2">
+                    <input class="form-check-input" type="checkbox" id="settingEnableComments" />
+                    <label class="form-check-label" for="settingEnableComments"
+                      >Enable move comments (show annotations below the board; add notes when signed in on your
+                      wiki)</label
+                    >
+                  </div>
+                  <div class="wiki-chess-piece-set-picker mt-3">
+                    <label class="form-label fw-semibold mb-1" id="gameSettingsPieceSetLabel">Choose Chess set</label>
+                    <details class="wiki-chess-piece-set-chooser">
+                      <summary class="wiki-chess-piece-set-summary">
+                        <span class="wiki-chess-piece-set-current"></span>
+                      </summary>
+                      <div
+                        class="wiki-chess-piece-set-options"
+                        role="radiogroup"
+                        aria-labelledby="gameSettingsPieceSetLabel"></div>
+                    </details>
+                  </div>
+                </div>
+              </details>
+              <details class="wiki-chess-drawer wiki-chess-thanks" open>
+                <summary>Attributions and Thanks</summary>
+                <div class="wiki-chess-thanks-body">
+                  <p class="wiki-chess-thanks-intro">
+                    Federated Wiki Chess itself is licensed under the
+                    <a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer"
+                      >MIT License</a
+                    >. It is built on free and open source software. Thanks to the following projects for their work:
+                  </p>
+                  <ul class="wiki-chess-thanks-list mb-0">
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://getbootstrap.com/" target="_blank" rel="noopener noreferrer">Bootstrap</a>
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/twbs/bootstrap/blob/main/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Responsive layout, modals, buttons, and form controls used across the chess shell, dialogs, and
+                        position editor.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a
+                          href="https://github.com/shaack/bootstrap-auto-dark-mode"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >bootstrap-auto-dark-mode</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/bootstrap-auto-dark-mode/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Follows the OS light/dark preference for Bootstrap’s <code>data-bs-theme</code> attribute.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://jquery.com/" target="_blank" rel="noopener noreferrer">jQuery</a>
+                        <span class="wiki-chess-thanks-meta">(<code>jquery-3.3.1.slim.min.js</code>)</span>
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://jquery.org/license/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Legacy DOM helper required by Bootstrap’s JavaScript bundle in the chess app shell.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a
+                          href="https://github.com/guybedford/es-module-shims"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >es-module-shims</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/guybedford/es-module-shims/blob/main/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Import-map and ES module compatibility shim for loading the chess app in older browsers.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://github.com/shaack/chess-console" target="_blank" rel="noopener noreferrer"
+                          >chess-console</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/chess-console/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        In-browser chess game framework: board host, move history, captured pieces, persistence, and the
+                        control toolbar.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a
+                          href="https://github.com/shaack/chess-console-stockfish"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >chess-console-stockfish</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/chess-console-stockfish/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Plugs Stockfish into chess-console: engine moves, level selection, evaluation display, and the
+                        new-game dialog.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://chessmail.eu/" target="_blank" rel="noopener noreferrer">chessmail.eu</a>
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Reference deployment of browser chess with Stockfish; early inspiration for playing engine games
+                        on the web.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://github.com/shaack/cm-chessboard" target="_blank" rel="noopener noreferrer"
+                          >cm-chessboard</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/cm-chessboard/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Interactive SVG chessboard with drag-and-drop moves, legal-move hints, orientation flip, and
+                        promotion dialog.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://github.com/shaack/cm-engine-runner" target="_blank" rel="noopener noreferrer"
+                          >cm-engine-runner</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/cm-engine-runner/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Talks to UCI chess engines inside a Web Worker and returns best moves, scores, and search status
+                        to the UI.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://github.com/shaack/cm-fen-editor" target="_blank" rel="noopener noreferrer"
+                          >cm-fen-editor</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/shaack/cm-fen-editor/blob/master/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Set up custom positions from FEN before starting a game; place, remove, and drag pieces on an
+                        editable board.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://fontawesome.com/" target="_blank" rel="noopener noreferrer">Font Awesome</a>
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >CC BY 4.0</a
+                        >
+                        <span class="wiki-chess-thanks-meta">/</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >MIT</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Toolbar, undo, flip, and copy-button icons plus modal affordances used throughout the chess
+                        interface.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a
+                          href="https://github.com/shaack/chess-console/tree/master/assets/sounds"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >chess_console_sounds.mp3</a
+                        >
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://creativecommons.org/licenses/by/4.0/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >CC BY 4.0</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Move, capture, and check sound effects from the chess-console asset pack, played during live
+                        play.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry">
+                      <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                        <a href="https://github.com/nmrugg/stockfish.js" target="_blank" rel="noopener noreferrer"
+                          >stockfish.js</a
+                        >
+                        <span class="wiki-chess-thanks-meta">(<code>stockfish-18-lite-single.js</code>)</span>
+                        <span class="wiki-chess-thanks-meta">·</span>
+                        <a
+                          class="wiki-chess-thanks-license"
+                          href="https://www.gnu.org/licenses/gpl-3.0.html"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          >GPL-3.0</a
+                        >
+                      </div>
+                      <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                        Stockfish 18 compiled to WebAssembly (lite, single-threaded — no cross-origin isolation needed);
+                        runs as the computer opponent in engine games inside a dedicated worker.
+                      </p>
+                    </li>
+                    <li class="wiki-chess-thanks-entry wiki-chess-thanks-piece-sets-entry">
+                      <div class="wiki-chess-thanks-piece-sets">
+                        <div class="wiki-chess-thanks-piece-sets-heading">Chess Piece Sets</div>
+                        <ul class="wiki-chess-thanks-list wiki-chess-thanks-piece-sets-list mb-0">
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Lichess</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note"
+                                >thanks for hosting and curating these piece sets</span
+                              >
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/celtic"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Celtic</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://opensource.org/licenses/MIT"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >MIT</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">Maurizio Monge</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/shapes"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Shapes</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://creativecommons.org/licenses/by-sa/4.0/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >CC BY-SA 4.0</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">flugsio</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/cburnett"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Cburnett</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >GPL-2.0-or-later</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">Colin M. L. Burnett</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/mpchess"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >mpchess</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.gnu.org/licenses/gpl-3.0.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >GPL-3.0-or-later</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">Maxime Chupin</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/pixel"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Pixel</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.gnu.org/licenses/agpl-3.0.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >AGPL-3.0-or-later</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">therealqtpi</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/kosal"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Kosal</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.gnu.org/licenses/agpl-3.0.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >AGPL-3.0-or-later</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">lila authors</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/chessnut"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Chessnut</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.apache.org/licenses/LICENSE-2.0"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Apache-2.0</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">Alexis Luengas</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/merida"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Merida</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >GPL-2.0-or-later</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">Armando Hernandez Marroquin</span>
+                            </div>
+                          </li>
+                          <li class="wiki-chess-thanks-entry">
+                            <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                              <a
+                                href="https://github.com/lichess-org/lila/tree/master/public/piece/kiwen-suwi"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Kiwen Suwi</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <a
+                                class="wiki-chess-thanks-license"
+                                href="https://creativecommons.org/licenses/by/4.0/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >CC BY 4.0</a
+                              >
+                              <span class="wiki-chess-thanks-meta">·</span>
+                              <span class="wiki-chess-thanks-note">neverRare</span>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+                      </details>
                     </div>
                   </div>
-                  <div class="col-6 col-md-12 col-lg-6">
-                    <div class="">
-                      <input type="checkbox" name="castling" class="checkbox-castle checkbox-castle-bk" id="castle-bk" value="k">
-                      <label class="custom-control-label" for="castle-bk">Black O-O</label>
+                </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PUZZLE Page -->
+    <div class="page container" id="puzzle">
+      <div class="container-fluid py-2 wiki-puzzle">
+        <div id="puzzle-loaded" hidden>
+          <div class="wiki-puzzle-bar d-flex flex-wrap align-items-center justify-content-between mb-2">
+            <div class="wiki-puzzle-meta">
+              <span class="wiki-puzzle-badge"><i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i> Puzzle</span>
+              <span class="wiki-puzzle-source-badge" id="puzzle-source-badge" hidden></span>
+              <span class="wiki-puzzle-farm-db-badge" id="puzzle-farm-db-badge" hidden></span>
+              <span class="wiki-puzzle-dim">Rating</span> <span id="puzzle-rating">—</span>
+              <span class="wiki-puzzle-dim">·</span> <span id="puzzle-themes">tactics</span>
+            </div>
+          </div>
+          <div class="wiki-puzzle-filters-row mt-0 mb-2">
+            <span class="wiki-puzzle-filters-badge" id="puzzle-filters-badge" hidden></span>
+          </div>
+          <div id="puzzle-console-container"></div>
+          <div class="wiki-puzzle-color-line mb-1">
+            <span class="wiki-puzzle-dim">to play:</span> <strong id="puzzle-color">White</strong>
+          </div>
+          <p id="puzzle-status" class="wiki-puzzle-status mt-0 mb-2" role="status" tabindex="-1"></p>
+          <p id="puzzle-solution" class="wiki-puzzle-solution mb-2" hidden></p>
+          <div class="wiki-puzzle-controls">
+            <button type="button" class="btn btn-sm btn-primary wiki-chess-action-btn" id="puzzleNextBtn">
+              <i class="fas fa-forward fa-fw" aria-hidden="true"></i> New Puzzle
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn" id="puzzleRetryBtn">
+              <i class="fas fa-undo fa-fw" aria-hidden="true"></i> Retry
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleRevealBtn"
+              title="Show the solution for this puzzle">
+              <i class="fas fa-eye fa-fw" aria-hidden="true"></i> Reveal Solution
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleEditFiltersBtn"
+              title="Choose which puzzles to draw from (rating, popularity); the choice is saved into the item">
+              <i class="fas fa-sliders-h fa-fw" aria-hidden="true"></i> Edit Filters
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-success wiki-chess-action-btn"
+              id="puzzleTrainingLogBtn"
+              title="Opt in: save this solve to your private training log (and certify on your fork if you own this page)"
+              hidden>
+              <i class="fas fa-certificate fa-fw" aria-hidden="true"></i> Add to My Training Log
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleSaveBtn"
+              title="Save this exact puzzle into the item so it always loads (instead of a random one)"
+              hidden>
+              <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save This Puzzle
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
+              id="puzzleMyGamesBtn"
+              title="Open your My Chess Games page in the wiki">
+              <i class="fas fa-list fa-fw" aria-hidden="true"></i> My Chess Games
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleChooseModeBtn"
+              title="Return to the game mode menu">
+              <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
+            </button>
+            <div class="wiki-puzzle-offline-actions mb-0 align-self-center" id="puzzle-offline-optin-wrap" hidden>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="puzzle-local-puzzles-btn"
+                title="Download the Lichess puzzle database for offline play">
+                Download for offline play
+              </button>
+            </div>
+            <p
+              class="wiki-puzzle-local-download-hint text-muted small mb-0 align-self-center"
+              id="puzzle-local-download-hint"
+              hidden
+              aria-live="polite"></p>
+          </div>
+          <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-1" open hidden>
+            <summary>Board settings</summary>
+            <div class="wiki-chess-board-settings-body">
+              <div class="wiki-chess-piece-set-picker">
+                <label class="form-label fw-semibold mb-1" id="puzzleBoardSettingsPieceSetLabel"
+                  >Choose Chess set</label
+                >
+                <details class="wiki-chess-piece-set-chooser">
+                  <summary class="wiki-chess-piece-set-summary">
+                    <span class="wiki-chess-piece-set-current"></span>
+                  </summary>
+                  <div
+                    class="wiki-chess-piece-set-options"
+                    role="radiogroup"
+                    aria-labelledby="puzzleBoardSettingsPieceSetLabel"></div>
+                </details>
+              </div>
+            </div>
+          </details>
+          <details class="wiki-chess-drawer wiki-chess-thanks mt-2" open>
+            <summary>Attributions and Thanks</summary>
+            <div class="wiki-chess-thanks-body">
+              <p class="wiki-puzzle-attribution text-muted mt-0 mb-2">
+                Puzzles from the
+                <a href="https://database.lichess.org/#puzzles" target="_blank" rel="noopener">Lichess open database</a>
+                (CC0).
+              </p>
+              <p class="wiki-chess-thanks-intro">
+                Puzzle Mode is built on free and open source software. Thanks to the following projects:
+              </p>
+              <ul class="wiki-chess-thanks-list mb-0">
+                <li class="wiki-chess-thanks-entry">
+                  <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                    <a href="https://database.lichess.org/#puzzles" target="_blank" rel="noopener noreferrer"
+                      >Lichess open puzzle database</a
+                    >
+                    <span class="wiki-chess-thanks-meta">·</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://creativecommons.org/publicdomain/zero/1.0/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >CC0</a
+                    >
+                  </div>
+                  <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                    The puzzles themselves: positions, ratings, themes, and solution lines drawn from the Lichess open
+                    puzzle database.
+                  </p>
+                </li>
+                <li class="wiki-chess-thanks-entry">
+                  <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                    <a href="https://getbootstrap.com/" target="_blank" rel="noopener noreferrer">Bootstrap</a>
+                    <span class="wiki-chess-thanks-meta">·</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://github.com/twbs/bootstrap/blob/main/LICENSE"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >MIT</a
+                    >
+                  </div>
+                  <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                    Layout, buttons, and badges used across the puzzle bar, status line, and controls.
+                  </p>
+                </li>
+                <li class="wiki-chess-thanks-entry">
+                  <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                    <a href="https://github.com/shaack/chess-console" target="_blank" rel="noopener noreferrer"
+                      >chess-console</a
+                    >
+                    <span class="wiki-chess-thanks-meta">·</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://github.com/shaack/chess-console/blob/master/LICENSE"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >MIT</a
+                    >
+                  </div>
+                  <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                    Board host and move handling that present the puzzle position and drive the solve flow.
+                  </p>
+                </li>
+                <li class="wiki-chess-thanks-entry">
+                  <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                    <a href="https://github.com/shaack/cm-chessboard" target="_blank" rel="noopener noreferrer"
+                      >cm-chessboard</a
+                    >
+                    <span class="wiki-chess-thanks-meta">·</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://github.com/shaack/cm-chessboard/blob/master/LICENSE"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >MIT</a
+                    >
+                  </div>
+                  <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                    Interactive SVG board with drag-and-drop moves, legal-move hints, and the promotion dialog used
+                    while solving.
+                  </p>
+                </li>
+                <li class="wiki-chess-thanks-entry">
+                  <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                    <a href="https://fontawesome.com/" target="_blank" rel="noopener noreferrer">Font Awesome</a>
+                    <span class="wiki-chess-thanks-meta">·</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >CC BY 4.0</a
+                    >
+                    <span class="wiki-chess-thanks-meta">/</span>
+                    <a
+                      class="wiki-chess-thanks-license"
+                      href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >MIT</a
+                    >
+                  </div>
+                  <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                    Icons on the puzzle controls (new puzzle, retry, reveal, save, and switch mode).
+                  </p>
+                </li>
+                <li class="wiki-chess-thanks-entry wiki-chess-thanks-piece-sets-entry">
+                  <div class="wiki-chess-thanks-piece-sets">
+                    <div class="wiki-chess-thanks-piece-sets-heading">Chess Piece Sets</div>
+                    <ul class="wiki-chess-thanks-list wiki-chess-thanks-piece-sets-list mb-0">
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Lichess</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">thanks for hosting and curating these piece sets</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/celtic"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Celtic</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://opensource.org/licenses/MIT"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >MIT</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">Maurizio Monge</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/shapes"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Shapes</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://creativecommons.org/licenses/by-sa/4.0/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >CC BY-SA 4.0</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">flugsio</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/cburnett"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Cburnett</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >GPL-2.0-or-later</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">Colin M. L. Burnett</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/mpchess"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >mpchess</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.gnu.org/licenses/gpl-3.0.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >GPL-3.0-or-later</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">Maxime Chupin</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/pixel"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Pixel</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.gnu.org/licenses/agpl-3.0.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >AGPL-3.0-or-later</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">therealqtpi</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/kosal"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Kosal</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.gnu.org/licenses/agpl-3.0.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >AGPL-3.0-or-later</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">lila authors</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/chessnut"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Chessnut</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.apache.org/licenses/LICENSE-2.0"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Apache-2.0</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">Alexis Luengas</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/merida"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Merida</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >GPL-2.0-or-later</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">Armando Hernandez Marroquin</span>
+                        </div>
+                      </li>
+                      <li class="wiki-chess-thanks-entry">
+                        <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                          <a
+                            href="https://github.com/lichess-org/lila/tree/master/public/piece/kiwen-suwi"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >Kiwen Suwi</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <a
+                            class="wiki-chess-thanks-license"
+                            href="https://creativecommons.org/licenses/by/4.0/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >CC BY 4.0</a
+                          >
+                          <span class="wiki-chess-thanks-meta">·</span>
+                          <span class="wiki-chess-thanks-note">neverRare</span>
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </details>
+        </div>
+        <div id="puzzle-load-error" class="wiki-puzzle-placeholder" hidden>
+          <p class="wiki-puzzle-icon mb-2" aria-hidden="true">🧩</p>
+          <p class="wiki-puzzle-lead text-muted mb-0">Couldn't start the puzzle board. Try reopening this item.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- PUZZLE AUTHOR Page (create a puzzle from a position) -->
+    <div class="page container" id="puzzle-author">
+      <div class="container-fluid py-2 wiki-puzzle">
+        <div class="wiki-puzzle-bar d-flex flex-wrap align-items-center justify-content-between mb-2">
+          <div class="wiki-puzzle-meta">
+            <span class="wiki-puzzle-badge"
+              ><i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i> Create puzzle</span
+            >
+          </div>
+        </div>
+        <div id="author-console-container"></div>
+        <p id="puzzleAuthorStatus" class="wiki-puzzle-status mt-2 mb-1" role="status" tabindex="-1"></p>
+        <p id="puzzleAuthorMoves" class="wiki-puzzle-author-moves mb-2"></p>
+        <div class="wiki-puzzle-author-prompt mb-2">
+          <label class="form-label wiki-puzzle-author-prompt-label mb-1" for="puzzleAuthorPrompt">Puzzle prompt</label>
+          <input
+            type="text"
+            class="form-control form-control-sm"
+            id="puzzleAuthorPrompt"
+            maxlength="200"
+            placeholder="Text shown to the solver (e.g. Find the fork!)"
+            autocomplete="off" />
+          <p class="form-text mb-1">Shown when solving this puzzle. Pick a suggestion or write your own.</p>
+          <div
+            id="puzzleAuthorPromptSuggestions"
+            class="wiki-puzzle-prompt-suggestions"
+            role="group"
+            aria-label="Suggested puzzle prompts"></div>
+        </div>
+        <div class="wiki-puzzle-controls">
+          <button type="button" class="btn btn-sm btn-primary wiki-chess-action-btn" id="puzzleAuthorSaveBtn" disabled>
+            <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save Puzzle
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary wiki-chess-action-btn"
+            id="puzzleAuthorCancelBtn">
+            <i class="fas fa-times fa-fw" aria-hidden="true"></i> Back to Editor
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+            id="puzzleAuthorChooseModeBtn"
+            title="Return to the game mode menu">
+            <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
+          </button>
+        </div>
+        <p class="wiki-puzzle-attribution text-muted mt-2 mb-0">
+          Saved in the
+          <a href="https://database.lichess.org/#puzzles" target="_blank" rel="noopener">Lichess puzzle format</a>: the
+          side to move makes the setup move, then the solver finds the replies.
+        </p>
+      </div>
+    </div>
+
+    <!-- POSITION Page -->
+    <div class="page container" id="position">
+      <div class="container-fluid">
+        <div class="cm-fen-editor">
+          <div class="form-group row mb-2 g-2 wiki-fen-toolbar">
+            <label for="fenInputOutput" class="col-auto col-form-label d-none d-md-block">FEN</label>
+            <div class="col">
+              <div class="input-group">
+                <input type="text" class="form-control fen-input-output" id="fenInputOutput" />
+                <button
+                  class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                  type="button"
+                  id="copyFenBtn"
+                  title="Copy FEN"
+                  aria-label="Copy FEN to clipboard">
+                  <i class="fas fa-copy" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
+            <div class="col-auto">
+              <label for="positionSetUp" class="visually-hidden">Position presets</label>
+              <select
+                class="form-select fen-select"
+                id="positionSetUp"
+                title="Load a common starting position onto the board">
+                <option value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" selected>
+                  Starting Position
+                </option>
+                <option value="4k3/8/8/8/8/8/8/4K3 w - - 0 1">Kings Only</option>
+                <option value="4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1">Kings and Pawns</option>
+                <option value="8/8/8/8/8/8/8/8 w - - 0 1">Empty Board</option>
+              </select>
+            </div>
+          </div>
+          <div class="row wiki-fen-main g-2">
+            <div class="col-xl-7 col-md-7 mb-2 wiki-fen-board-col">
+              <div class="wiki-fen-board">
+                <div class="chessboard"></div>
+              </div>
+              <div class="wiki-fen-under-board">
+                <p class="wiki-fen-board-hint text-muted mb-0">
+                  Click on an empty square to create a piece.<br />Move a piece out of the board to remove it.
+                </p>
+              </div>
+            </div>
+            <div class="col-xl-5 col-md-5 wiki-fen-sidebar">
+              <div class="card conditions-inputs mb-3">
+                <div class="card-header p-3">
+                  <div class="form-group mb-3">
+                    <label for="colorToPlay" class="visually-hidden">Color to play</label>
+                    <select class="form-select color-to-play" id="colorToPlay">
+                      <option value="w">White to play</option>
+                      <option value="b">Black to play</option>
+                    </select>
+                  </div>
+                  <p class="mb-2">Allowed castling</p>
+                  <div class="row">
+                    <div class="col-6 col-md-12 col-lg-6">
+                      <div class="">
+                        <input
+                          type="checkbox"
+                          name="castling"
+                          class="checkbox-castle checkbox-castle-wk"
+                          id="castle-wk"
+                          value="K" />
+                        <label class="custom-control-label" for="castle-wk">White O-O</label>
+                      </div>
+                      <div class="">
+                        <input
+                          type="checkbox"
+                          name="castling"
+                          class="checkbox-castle checkbox-castle-wq"
+                          id="castle-wq"
+                          value="Q" />
+                        <label class="custom-control-label" for="castle-wq">White O-O-O</label>
+                      </div>
                     </div>
-                    <div class="">
-                      <input type="checkbox" name="castling" class="checkbox-castle checkbox-castle-bq" id="castle-bq" value="q">
-                      <label class="custom-control-label" for="castle-bq">Black O-O-O</label>
+                    <div class="col-6 col-md-12 col-lg-6">
+                      <div class="">
+                        <input
+                          type="checkbox"
+                          name="castling"
+                          class="checkbox-castle checkbox-castle-bk"
+                          id="castle-bk"
+                          value="k" />
+                        <label class="custom-control-label" for="castle-bk">Black O-O</label>
+                      </div>
+                      <div class="">
+                        <input
+                          type="checkbox"
+                          name="castling"
+                          class="checkbox-castle checkbox-castle-bq"
+                          id="castle-bq"
+                          value="q" />
+                        <label class="custom-control-label" for="castle-bq">Black O-O-O</label>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
-            <div class="form-floating mb-3">
-              <select class="form-select use-action" id="useAction">
-                <option selected disabled value="">…</option>
-                <option value="engine">Start Engine Game</option>
-                <option disabled value="personalInvitation">Create personal invitation</option>
-                <option disabled value="openInvitation">Create open invitation</option>
-                <option disabled value="puzzle">Create chess problem in forum</option>
-              </select>
-              <label class="label" for="useAction">Use position</label>
-            </div>
-            <p class="text-muted">Click on an empty square to create a piece. Move a piece out of the board to remove
-              it.</p>
           </div>
-          <ul class="list-inline">
-            <li class="list-inline-item">
-              <a href="https://github.com/shaack/cm-fen-editor">GitHub repository</a>
-            </li>
-          </ul>
+          <div class="wiki-chess-fen-footer mt-2">
+            <div class="wiki-chess-fen-actions mb-2">
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-secondary wiki-chess-action-btn"
+                id="positionFlipBoardBtn"
+                title="Flip the board to view it from the other side (does not change the position)">
+                <i class="fas fa-retweet fa-fw" aria-hidden="true"></i> Flip Board
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="positionStartGameActionBtn"
+                title="Choose opponent and start a game from this position">
+                <i class="fas fa-flag-checkered fa-fw" aria-hidden="true"></i> Start Game from Position
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="positionCreatePuzzleBtn"
+                title="Record a solution line from this position and save it as a puzzle">
+                <i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i> Create Puzzle
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="positionSaveToWikiBtn"
+                title="Save this position to the wiki page"
+                hidden>
+                <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save Position to Wiki
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
+                id="positionMyGamesBtn"
+                title="Open your My Chess Games page in the wiki">
+                <i class="fas fa-list fa-fw" aria-hidden="true"></i> My Chess Games
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="positionChooseModeBtn"
+                title="Return to the game mode menu">
+                <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
+              </button>
+            </div>
+            <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-2" open hidden>
+              <summary>Board settings</summary>
+              <div class="wiki-chess-board-settings-body">
+                <div class="wiki-chess-piece-set-picker">
+                  <label class="form-label fw-semibold mb-1" id="positionBoardSettingsPieceSetLabel"
+                    >Choose Chess set</label
+                  >
+                  <details class="wiki-chess-piece-set-chooser">
+                    <summary class="wiki-chess-piece-set-summary">
+                      <span class="wiki-chess-piece-set-current"></span>
+                    </summary>
+                    <div
+                      class="wiki-chess-piece-set-options"
+                      role="radiogroup"
+                      aria-labelledby="positionBoardSettingsPieceSetLabel"></div>
+                  </details>
+                </div>
+              </div>
+            </details>
+            <details class="wiki-chess-drawer wiki-chess-thanks" open>
+              <summary>Attributions and Thanks</summary>
+              <div class="wiki-chess-thanks-body">
+                <p class="wiki-chess-thanks-intro">
+                  The position editor is built on free and open source software. Thanks to the following projects:
+                </p>
+                <ul class="wiki-chess-thanks-list mb-0">
+                  <li class="wiki-chess-thanks-entry">
+                    <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                      <a href="https://getbootstrap.com/" target="_blank" rel="noopener noreferrer">Bootstrap</a>
+                      <span class="wiki-chess-thanks-meta">·</span>
+                      <a
+                        class="wiki-chess-thanks-license"
+                        href="https://github.com/twbs/bootstrap/blob/main/LICENSE"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >MIT</a
+                      >
+                    </div>
+                    <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                      Layout, cards, form controls, and buttons for the FEN toolbar, castling panel, and start-game
+                      options.
+                    </p>
+                  </li>
+                  <li class="wiki-chess-thanks-entry">
+                    <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                      <a href="https://github.com/shaack/cm-fen-editor" target="_blank" rel="noopener noreferrer"
+                        >cm-fen-editor</a
+                      >
+                      <span class="wiki-chess-thanks-meta">·</span>
+                      <a
+                        class="wiki-chess-thanks-license"
+                        href="https://github.com/shaack/cm-fen-editor/blob/master/LICENSE"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >MIT</a
+                      >
+                    </div>
+                    <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                      Position setup: editable board, live FEN output, castling rights, color to move, and preset
+                      positions.
+                    </p>
+                  </li>
+                  <li class="wiki-chess-thanks-entry">
+                    <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                      <a href="https://github.com/shaack/cm-chessboard" target="_blank" rel="noopener noreferrer"
+                        >cm-chessboard</a
+                      >
+                      <span class="wiki-chess-thanks-meta">·</span>
+                      <a
+                        class="wiki-chess-thanks-license"
+                        href="https://github.com/shaack/cm-chessboard/blob/master/LICENSE"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >MIT</a
+                      >
+                    </div>
+                    <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                      SVG board used to place, drag, and remove pieces while editing a position.
+                    </p>
+                  </li>
+                  <li class="wiki-chess-thanks-entry">
+                    <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                      <a href="https://fontawesome.com/" target="_blank" rel="noopener noreferrer">Font Awesome</a>
+                      <span class="wiki-chess-thanks-meta">·</span>
+                      <a
+                        class="wiki-chess-thanks-license"
+                        href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >CC BY 4.0</a
+                      >
+                      <span class="wiki-chess-thanks-meta">/</span>
+                      <a
+                        class="wiki-chess-thanks-license"
+                        href="https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        >MIT</a
+                      >
+                    </div>
+                    <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
+                      Copy-to-clipboard icon on the FEN field.
+                    </p>
+                  </li>
+                  <li class="wiki-chess-thanks-entry wiki-chess-thanks-piece-sets-entry">
+                    <div class="wiki-chess-thanks-piece-sets">
+                      <div class="wiki-chess-thanks-piece-sets-heading">Chess Piece Sets</div>
+                      <ul class="wiki-chess-thanks-list wiki-chess-thanks-piece-sets-list mb-0">
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Lichess</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">thanks for hosting and curating these piece sets</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/celtic"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Celtic</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://opensource.org/licenses/MIT"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >MIT</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">Maurizio Monge</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/shapes"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Shapes</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://creativecommons.org/licenses/by-sa/4.0/"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >CC BY-SA 4.0</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">flugsio</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/cburnett"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Cburnett</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >GPL-2.0-or-later</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">Colin M. L. Burnett</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/mpchess"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >mpchess</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.gnu.org/licenses/gpl-3.0.html"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >GPL-3.0-or-later</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">Maxime Chupin</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/pixel"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Pixel</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.gnu.org/licenses/agpl-3.0.html"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >AGPL-3.0-or-later</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">therealqtpi</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/kosal"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Kosal</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.gnu.org/licenses/agpl-3.0.html"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >AGPL-3.0-or-later</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">lila authors</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/chessnut"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Chessnut</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.apache.org/licenses/LICENSE-2.0"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Apache-2.0</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">Alexis Luengas</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/merida"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Merida</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >GPL-2.0-or-later</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">Armando Hernandez Marroquin</span>
+                          </div>
+                        </li>
+                        <li class="wiki-chess-thanks-entry">
+                          <div class="wiki-chess-thanks-line wiki-chess-thanks-line-name">
+                            <a
+                              href="https://github.com/lichess-org/lila/tree/master/public/piece/kiwen-suwi"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >Kiwen Suwi</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <a
+                              class="wiki-chess-thanks-license"
+                              href="https://creativecommons.org/licenses/by/4.0/"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              >CC BY 4.0</a
+                            >
+                            <span class="wiki-chess-thanks-meta">·</span>
+                            <span class="wiki-chess-thanks-note">neverRare</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </details>
+          </div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- ERROR Page -->
-  <div class="page container" id="error">
-    <h1>Error</h1>
-    <p>An error occurred while processing your request.</p>
-  </div>
-</body>
+    <!-- ERROR Page (body filled by showErrorPage() in chess-app.js) -->
+    <div class="page container" id="error" role="alert">
+      <div class="container-fluid py-3 wiki-chess-error-page">
+        <h1 class="wiki-chess-error-title h4">Something went wrong</h1>
+        <p class="wiki-chess-error-message mb-0">An error occurred while loading this chess item.</p>
+        <div class="wiki-chess-error-actions mt-3">
+          <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn" id="wikiChessErrorBackBtn">
+            <i class="fas fa-arrow-left fa-fw" aria-hidden="true"></i> Back to menu
+          </button>
+        </div>
+      </div>
+    </div>
 
-<!-- SCRIPTS -->
-<script type="module" src="./glitch-pwa.js"></script>
-<script src="./assets/js/bootstrap.bundle.min.js"></script>
-<script src="./assets/js/jquery-3.3.1.slim.min.js"></script>
-<script src="./assets/js/bootstrap-auto-dark-mode.js"></script>
-<script src="./assets/js/es-module-shims.min.js"></script>
+    <!-- LEADERBOARD Page: ranked players discovered across the neighbourhood or an
+       federated survey. Rows are filled by survey.js. -->
+    <div class="page container" id="leaderboard">
+      <div class="container-fluid py-3 wiki-chess-lb">
+        <!-- Toolbar: the interactive menu (reach, actions, ranking controls). Set off from
+           the results below by a divider so the two zones read distinctly. -->
+        <div class="wiki-chess-lb-toolbar" id="wikiChessLbToolbar">
+          <div class="wiki-chess-lb-head">
+            <h2 class="wiki-chess-lb-heading h5 mb-2" id="wikiChessLbHeading">
+              <i class="fas fa-trophy fa-fw" aria-hidden="true"></i> Chess Leaderboards
+            </h2>
+          </div>
+          <!-- Nav row under the first divider (CSS order) — back (left), refresh (center), My Chess Games (right). -->
+          <div class="wiki-chess-lb-actions wiki-chess-lb-actions-top" id="wikiChessLbActions">
+            <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn" id="wikiChessLbBack">
+              <i class="fas fa-arrow-left fa-fw" aria-hidden="true"></i> Back to menu
+            </button>
+            <div class="wiki-chess-lb-actions-center">
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="wikiChessLbRefresh"
+                title="Update using trusted checkpoints when the timeline has not moved">
+                <i class="fas fa-sync-alt fa-fw" aria-hidden="true"></i> Refresh
+              </button>
+              <span class="wiki-chess-lb-updating text-muted small" id="wikiChessLbUpdating" hidden aria-live="polite">
+                <i class="fas fa-circle-notch fa-spin fa-fw" aria-hidden="true"></i> Updating…
+              </span>
+            </div>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="wikiChessLbMyGames"
+              title="Open your My Chess Games page in the wiki">
+              My Chess Games <i class="fas fa-external-link-alt fa-fw" aria-hidden="true"></i>
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
+              id="wikiChessLbOpenPage"
+              title="Open Chess Leaderboards in the wiki">
+              Leaderboards <i class="fas fa-external-link-alt fa-fw" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="wiki-chess-lb-site-survey-actions" id="wikiChessLbSiteSurveyActions" hidden></div>
+          <div
+            class="wiki-chess-lb-divider wiki-chess-lb-divider-after-nav"
+            role="presentation"
+            aria-hidden="true"></div>
+          <!-- Reach (past opponents / federation) + established-only filter.
+             Column sort/filter lives in the table header (survey.js). -->
+          <div class="wiki-chess-lb-controls" id="wikiChessLbControls">
+            <div class="wiki-chess-lb-filters">
+              <div class="wiki-chess-lb-filter-group">
+                <p class="wiki-chess-lb-filter-label mb-0" id="wikiChessLbViewLabel">View</p>
+                <div
+                  class="wiki-chess-lb-modes btn-group btn-group-sm"
+                  role="group"
+                  aria-labelledby="wikiChessLbViewLabel"
+                  id="wikiChessLbModes">
+                  <button type="button" class="btn btn-outline-primary" data-lb-reach="mine" aria-pressed="true">
+                    Past opponents
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-outline-primary"
+                    data-lb-reach="neighborhood"
+                    aria-pressed="false">
+                    Neighborhood
+                  </button>
+                  <button type="button" class="btn btn-outline-primary" data-lb-reach="survey" aria-pressed="false">
+                    Visible federation
+                  </button>
+                </div>
+              </div>
+            </div>
+            <label
+              class="wiki-chess-lb-reliable"
+              for="wikiChessLbReliable"
+              title="Hide players whose rating is still provisional (too few rated games)">
+              <input type="checkbox" id="wikiChessLbReliable" /> established ratings only
+            </label>
+          </div>
+          <div class="wiki-chess-lb-hop-graph" id="wikiChessLbHopGraph" hidden>
+            <div class="wiki-chess-lb-hop-graph-top">
+              <p class="wiki-chess-lb-filter-label mb-0" id="wikiChessLbHopGraphLabel">Visible federation reach</p>
+              <div class="wiki-chess-lb-hop-blocked" id="wikiChessLbHopBlocked" aria-live="polite">
+                <span class="wiki-chess-lb-hop-blocked-count" id="wikiChessLbHopBlockedCount">0</span>
+                <span class="wiki-chess-lb-hop-blocked-label">sites blocked</span>
+              </div>
+            </div>
+            <div class="wiki-chess-lb-hop-controls" role="group" aria-labelledby="wikiChessLbHopGraphLabel">
+              <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-hops-field" for="wikiChessLbMaxHops">
+                <span class="wiki-chess-lb-hop-decay-head">
+                  Max hops
+                  <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbMaxHopsValue">3</span>
+                </span>
+                <input
+                  type="range"
+                  class="form-range"
+                  id="wikiChessLbMaxHops"
+                  min="1"
+                  max="12"
+                  step="1"
+                  value="3"
+                  aria-valuetext="3" />
+              </label>
+              <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-decay-field" for="wikiChessLbHopDecay">
+                <span class="wiki-chess-lb-hop-decay-head">
+                  Decay
+                  <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbHopDecayValue">0.80</span>
+                </span>
+                <input
+                  type="range"
+                  class="form-range"
+                  id="wikiChessLbHopDecay"
+                  min="0.5"
+                  max="1"
+                  step="0.05"
+                  value="0.8"
+                  aria-valuetext="0.80" />
+              </label>
+            </div>
+            <p class="wiki-chess-lb-hop-preview text-muted small mb-1" id="wikiChessLbHopPreview"></p>
+            <p class="wiki-chess-lb-hop-stats small mb-0" id="wikiChessLbHopStats"></p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-success wiki-chess-action-btn wiki-chess-lb-add-opponents"
+            id="wikiChessLbAddOpponents"
+            title="Register your past opponents as wiki neighbours"
+            hidden>
+            <i class="fas fa-user-plus fa-fw" aria-hidden="true"></i> Add my opponents to neighbourhood
+          </button>
+          <div class="wiki-chess-lb-divider" role="presentation" aria-hidden="true"></div>
+        </div>
+        <!-- Results zone: loading spinner applies to #wikiChessLbStatus only — the toolbar
+           above stays fully interactive while a crawl runs. -->
+        <div class="wiki-chess-lb-results" id="wikiChessLbResults">
+          <p class="wiki-chess-lb-site-intro text-muted small mb-2" id="wikiChessLbSiteIntro" hidden></p>
+          <p class="wiki-chess-lb-island-notice text-muted small mb-2" id="wikiChessLbIslandNotice" hidden></p>
+          <p class="wiki-chess-lb-status text-muted mb-2" id="wikiChessLbStatus" aria-live="polite">Loading…</p>
+          <div
+            class="wiki-chess-lb-standing alert alert-info py-2 px-3 mb-3"
+            id="wikiChessLbStanding"
+            role="status"
+            hidden></div>
+          <div class="wiki-chess-lb-table-panel" id="wikiChessLbTablePanel" hidden>
+            <div class="wiki-chess-lb-table-wrap" id="wikiChessLbTableWrap">
+              <table class="table table-sm wiki-chess-lb-table mb-0">
+                <thead id="wikiChessLbHead">
+                  <!-- Sort buttons + player search filled by survey.js -->
+                </thead>
+                <tbody id="wikiChessLbBody"></tbody>
+              </table>
+            </div>
+            <div
+              class="wiki-chess-lb-table-resize"
+              id="wikiChessLbTableResize"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize leaderboard height"
+              title="Drag to make the table taller or shorter"
+              tabindex="0"></div>
+          </div>
+          <p class="wiki-chess-lb-legend text-muted small mt-2 mb-0" id="wikiChessLbLegend" hidden>
+            <span id="wikiChessLbLegendProv"
+              ><span class="wiki-chess-lb-flag wiki-chess-lb-prov">*</span> provisional — too few rated games yet for a
+              reliable rating.
+            </span>
+            <span id="wikiChessLbLegendUnver"
+              ><span class="wiki-chess-lb-flag">†</span> unverified — no matching game found on the opponent’s
+              wiki.</span
+            >
+          </p>
+          <p class="wiki-chess-lb-empty text-muted" id="wikiChessLbEmpty" hidden>No rated players found yet.</p>
+          <!-- Unified site survey: open challenges, rated games, and unrated games — each
+           section scrolls independently inside the chess item. -->
+          <div class="wiki-chess-lb-games mt-3" id="wikiChessLbGames" hidden>
+            <h3 class="wiki-chess-lb-games-heading h6 mb-1">
+              <i class="fas fa-chess-board fa-fw" aria-hidden="true"></i> Your games
+            </h3>
+            <p class="wiki-chess-lb-games-note text-muted small mb-1" id="wikiChessLbGamesNote"></p>
+            <section class="wiki-chess-lb-survey-section" id="wikiChessLbSectionSeeks" hidden>
+              <details class="wiki-chess-lb-survey-details" open>
+                <summary class="wiki-chess-lb-survey-section-heading h6 mb-1">
+                  <span class="wiki-chess-lb-survey-section-title">Open challenges</span>
+                  <span class="wiki-chess-lb-survey-section-count" hidden aria-hidden="true"></span>
+                </summary>
+                <div class="wiki-chess-lb-games-scroll">
+                  <ul class="wiki-chess-lb-games-list small mb-0" id="wikiChessLbSeeks"></ul>
+                </div>
+              </details>
+            </section>
+            <section class="wiki-chess-lb-survey-section" id="wikiChessLbSectionActive" hidden>
+              <details class="wiki-chess-lb-survey-details" open>
+                <summary class="wiki-chess-lb-survey-section-heading h6 mb-1" id="wikiChessLbGamesActiveLabel">
+                  <span class="wiki-chess-lb-survey-section-title">Active games</span>
+                  <span class="wiki-chess-lb-survey-section-count" hidden aria-hidden="true"></span>
+                </summary>
+                <div class="wiki-chess-lb-games-scroll">
+                  <ul class="wiki-chess-lb-games-list small mb-0" id="wikiChessLbGamesActive"></ul>
+                </div>
+              </details>
+            </section>
+            <section class="wiki-chess-lb-survey-section" id="wikiChessLbSectionRated" hidden>
+              <details class="wiki-chess-lb-survey-details" open>
+                <summary class="wiki-chess-lb-survey-section-heading h6 mb-1" id="wikiChessLbGamesRatedLabel">
+                  <span class="wiki-chess-lb-survey-section-title">Rated games</span>
+                  <span class="wiki-chess-lb-survey-section-count" hidden aria-hidden="true"></span>
+                </summary>
+                <div class="wiki-chess-lb-games-scroll">
+                  <ul class="wiki-chess-lb-games-list small mb-0" id="wikiChessLbGamesRated"></ul>
+                </div>
+              </details>
+            </section>
+            <section class="wiki-chess-lb-survey-section" id="wikiChessLbSectionUnrated" hidden>
+              <details class="wiki-chess-lb-survey-details" open>
+                <summary class="wiki-chess-lb-survey-section-heading h6 mb-1" id="wikiChessLbGamesUnratedLabel">
+                  <span class="wiki-chess-lb-survey-section-title">Unrated games</span>
+                  <span class="wiki-chess-lb-survey-section-count" hidden aria-hidden="true"></span>
+                </summary>
+                <div class="wiki-chess-lb-games-scroll">
+                  <ul class="wiki-chess-lb-games-list small mb-0" id="wikiChessLbGamesUnrated"></ul>
+                </div>
+              </details>
+            </section>
+          </div>
+          <!-- Site survey footer (reserved): federated open-challenge lists refresh in the
+           background when you open the SURVEY item; survey.js may use
+           #wikiChessLbSurveyUpdate for optional status copy (e.g. last crawl time). -->
+          <p class="wiki-chess-lb-survey-update text-muted small mt-3 mb-0" id="wikiChessLbSurveyUpdate" hidden></p>
+        </div>
+      </div>
+    </div>
 
-<!-- Main chess script -->
-<script type="module">
-  import {
-    ChessConsole, LocalPlayer, Board, GameStateOutput,
-    History, CapturedPieces, HistoryControl, Persistence,
-    Sound, StockfishGameControl, StockfishPlayer,
-    StockfishStateView, StockfishNewGameDialog,
-    I18n, FEN, Pgn, FenEditor, MARKER_TYPE
-  } from "./cm-modules-bundle.js"
+    <!-- Start-game setup modal. Body-level so it can overlay either the position
+       editor ("Start game from position") or an active game (toolbar + "new game").
+       Title/lead text and the source position are set per use in chess-app.js. -->
+    <div class="wiki-stockfish-setup-root wiki-fen-start-modal" id="wikiFenStartModal" hidden>
+      <div class="wiki-stockfish-setup-backdrop" data-wiki-fen-start-dismiss="true" aria-hidden="true"></div>
+      <div class="wiki-stockfish-setup-panel" role="dialog" aria-modal="true" aria-labelledby="wiki-fen-start-title">
+        <div class="wiki-stockfish-setup-header">
+          <h2 id="wiki-fen-start-title" class="h5 mb-0">Start game from position</h2>
+        </div>
+        <div class="wiki-stockfish-setup-body">
+          <p class="text-muted mb-3" id="wiki-fen-start-lead">Choose who plays the other side.</p>
+          <div class="mb-3" id="positionOpponentWrap">
+            <div class="wiki-opponent-pick" role="group" aria-label="Opponent">
+              <button
+                type="button"
+                class="btn btn-outline-primary wiki-chess-action-btn wiki-opponent-pick-btn"
+                data-opponent="engine"
+                id="positionOpponentEngineBtn"
+                aria-pressed="false">
+                <i class="fas fa-robot fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Stockfish</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-outline-primary wiki-chess-action-btn wiki-opponent-pick-btn"
+                data-opponent="human"
+                id="positionOpponentHumanBtn"
+                aria-pressed="false">
+                <i class="fas fa-user-friends fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Human</span>
+              </button>
+            </div>
+            <select class="visually-hidden" id="positionOpponent" tabindex="-1" aria-hidden="true">
+              <option value="" selected>Choose opponent</option>
+              <option value="engine">Stockfish Engine</option>
+              <option value="human">Human Player</option>
+            </select>
+          </div>
+          <div class="mb-3" id="positionStockfishLevelWrap" hidden>
+            <label class="form-label fw-semibold" for="positionStockfishLevel">Stockfish level</label>
+            <select class="form-select" id="positionStockfishLevel"></select>
+            <div class="form-text" id="positionStockfishVersion"></div>
+          </div>
+          <div class="mb-3" id="positionHumanPlayWrap" hidden>
+            <label class="form-label fw-semibold" id="positionHumanPlayLabel">How you play</label>
+            <div class="wiki-opponent-pick" role="group" aria-labelledby="positionHumanPlayLabel">
+              <button
+                type="button"
+                class="btn btn-outline-primary wiki-chess-action-btn wiki-human-play-pick-btn"
+                data-human-play="same-device"
+                id="positionHumanPlaySameDeviceBtn"
+                aria-pressed="false">
+                <i class="fas fa-tablet-alt fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Same device</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-outline-primary wiki-chess-action-btn wiki-human-play-pick-btn"
+                data-human-play="correspondence"
+                id="positionHumanPlayNetworkedBtn"
+                aria-pressed="false">
+                <i class="fas fa-network-wired fa-fw" aria-hidden="true"></i
+                ><span class="wiki-chess-action-label">Networked devices</span>
+              </button>
+            </div>
+            <select class="visually-hidden" id="positionHumanPlay" tabindex="-1" aria-hidden="true">
+              <option value="" selected>Choose how you play</option>
+              <option value="correspondence">Networked devices</option>
+              <option value="same-device">Same device</option>
+            </select>
+          </div>
+          <!-- Same-device extras: progressive — orientation → flip (if opposite) → piece set. -->
+          <div class="mb-3" id="positionSameDeviceWrap" hidden>
+            <div id="positionSameDeviceOrientStep">
+              <label class="form-label fw-semibold" id="positionSameDeviceOrientLabel">Player orientation</label>
+              <div class="wiki-same-device-pick" role="group" aria-labelledby="positionSameDeviceOrientLabel">
+                <button
+                  type="button"
+                  class="btn btn-outline-primary wiki-chess-action-btn wiki-same-device-orient-btn"
+                  data-orientation="opposite-sides"
+                  id="positionSameDeviceOppositeBtn"
+                  aria-pressed="false">
+                  <span class="wiki-chess-orient-combo wiki-chess-orient-combo--opposite" aria-hidden="true">
+                    <i class="fas fa-hand-paper fa-rotate-180 wiki-chess-orient-hand"></i>
+                    <i class="fas fa-mobile-alt wiki-chess-orient-device"></i>
+                    <i class="fas fa-hand-paper wiki-chess-orient-hand"></i>
+                  </span>
+                  <span class="wiki-chess-action-label">Opposite sides</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline-primary wiki-chess-action-btn wiki-same-device-orient-btn"
+                  data-orientation="hand-around"
+                  id="positionSameDeviceHandAroundBtn"
+                  aria-pressed="false">
+                  <span class="wiki-chess-orient-combo wiki-chess-orient-combo--hand-around" aria-hidden="true">
+                    <i
+                      class="fas fa-hand-paper fa-flip-horizontal wiki-chess-orient-hand wiki-chess-orient-hand-pass"></i>
+                    <i class="fas fa-mobile-alt wiki-chess-orient-device"></i>
+                    <i class="fas fa-hand-paper wiki-chess-orient-hand wiki-chess-orient-hand-receive"></i>
+                  </span>
+                  <span class="wiki-chess-action-label">Pass around</span>
+                </button>
+              </div>
+              <input type="hidden" id="positionSameDeviceOrientation" value="" />
+              <div class="form-text" id="positionSameDeviceOrientHint" hidden>
+                Sit facing each other, or pass one device without changing seats.
+              </div>
+            </div>
+            <div class="mt-3" id="positionSameDeviceFlipToggleWrap" hidden>
+              <label class="form-label fw-semibold" id="positionSameDeviceFlipLabel">After each move</label>
+              <div class="wiki-same-device-pick" role="group" aria-labelledby="positionSameDeviceFlipLabel">
+                <button
+                  type="button"
+                  class="btn btn-outline-primary wiki-chess-action-btn wiki-same-device-flip-btn"
+                  data-flip="true"
+                  id="positionSameDeviceFlipOnBtn"
+                  aria-pressed="false">
+                  <i class="fas fa-redo fa-fw" aria-hidden="true"></i
+                  ><span class="wiki-chess-action-label">Flip pieces</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline-primary wiki-chess-action-btn wiki-same-device-flip-btn"
+                  data-flip="false"
+                  id="positionSameDeviceFlipOffBtn"
+                  aria-pressed="false">
+                  <i class="fas fa-ban fa-fw" aria-hidden="true"></i
+                  ><span class="wiki-chess-action-label">Don't flip</span>
+                </button>
+              </div>
+              <input type="hidden" id="positionSameDeviceFlip" value="" />
+              <div class="form-text" id="positionSameDeviceFlipHint" hidden>
+                After each move, pieces rotate 180° in place to face whoever moves next. Board sides stay put.
+              </div>
+            </div>
+            <div class="mt-3" id="positionSameDevicePieceWrap" hidden>
+              <label class="form-label fw-semibold" id="positionSameDevicePieceLabel">Choose chess piece set</label>
+              <div
+                class="wiki-chess-piece-set-picker wiki-chess-piece-set-picker-start"
+                id="positionSameDevicePiecePicker"
+                data-wiki-piece-set-defer="true">
+                <details class="wiki-chess-piece-set-chooser">
+                  <summary class="wiki-chess-piece-set-summary">
+                    <span class="wiki-chess-piece-set-current"></span>
+                  </summary>
+                  <div
+                    class="wiki-chess-piece-set-options"
+                    role="radiogroup"
+                    aria-labelledby="positionSameDevicePieceLabel"></div>
+                </details>
+              </div>
+              <div class="form-text" id="positionSameDevicePieceHint" hidden>
+                Merida is the default. Open to pick another set.
+              </div>
+            </div>
+          </div>
+          <div class="mb-3" id="positionHumanColorWrap" hidden>
+            <label class="form-label fw-semibold" for="positionHumanColor">Your color</label>
+            <select class="form-select" id="positionHumanColor">
+              <option value="random">Random</option>
+              <option value="w">White</option>
+              <option value="b">Black</option>
+            </select>
+          </div>
+          <div class="mb-3" id="positionOpponentWikiWrap" hidden>
+            <label class="form-label fw-semibold" for="positionOpponentWiki">Challenge wiki site</label>
+            <input
+              type="text"
+              class="form-control"
+              id="positionOpponentWiki"
+              placeholder="username.example.co"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="positionOpponentWikiHint positionOpponentWikiError" />
+            <div class="form-text" id="positionOpponentWikiHint">
+              Optional — leave blank for an open challenge anyone in the federation can join, or enter a wiki domain to
+              challenge one site.
+            </div>
+            <div class="invalid-feedback" id="positionOpponentWikiError" hidden></div>
+          </div>
+          <!-- Open-challenge fields: post a seek any qualifying wiki player can accept. -->
+          <div id="positionChallengeWrap" hidden>
+            <div class="mb-3">
+              <label class="form-label fw-semibold" for="positionChallengeRated">Game format</label>
+              <select class="form-select" id="positionChallengeRated">
+                <option value="unrated">Unrated</option>
+                <option value="rated">Rated (affects Glicko-2 rating)</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label fw-semibold" for="positionChallengeColor">Your color</label>
+              <select class="form-select" id="positionChallengeColor">
+                <option value="random">Random</option>
+                <option value="white">White</option>
+                <option value="black">Black</option>
+              </select>
+            </div>
+            <div class="mb-3 row g-2">
+              <div class="col">
+                <label class="form-label fw-semibold" for="positionChallengeMin">Min rating</label>
+                <input
+                  type="number"
+                  inputmode="numeric"
+                  class="form-control"
+                  id="positionChallengeMin"
+                  placeholder="any"
+                  min="0"
+                  max="3500"
+                  step="50"
+                  autocomplete="off" />
+              </div>
+              <div class="col">
+                <label class="form-label fw-semibold" for="positionChallengeMax">Max rating</label>
+                <input
+                  type="number"
+                  inputmode="numeric"
+                  class="form-control"
+                  id="positionChallengeMax"
+                  placeholder="any"
+                  min="0"
+                  max="3500"
+                  step="50"
+                  autocomplete="off" />
+              </div>
+            </div>
+            <p class="small text-muted mb-0">
+              Leave a rating blank for no limit. Opponents whose rating falls outside the range can view the game but
+              can't join.
+            </p>
+          </div>
+          <p class="small text-muted mb-0 wiki-fen-human-hint" id="positionHumanHint" hidden></p>
+          <div class="mb-0 mt-3" id="positionStartPageTitleWrap">
+            <label class="form-label fw-semibold" for="positionStartPageTitle">Wiki page title</label>
+            <input
+              type="text"
+              class="form-control"
+              id="positionStartPageTitle"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Built from your choices below" />
+            <div class="form-text" id="positionStartPageTitleHint">
+              Updates as you choose opponent and colour. Rated/casual and other details are saved in the PGN tags, not
+              the page title. Edit anytime.
+            </div>
+          </div>
+        </div>
+        <div class="wiki-stockfish-setup-footer">
+          <button type="button" class="btn btn-link" data-wiki-fen-start-dismiss="true">Cancel</button>
+          <button type="button" class="btn btn-primary" id="positionStartGameBtn">Start Game</button>
+        </div>
+      </div>
+    </div>
 
-  let chessObj, chessConsole, fenEditor
-  console.log("Chess Console loaded", ChessConsole)
-  const msgTarget = window.opener || window.parent !== window.self ? window.parent : null; // Determine where to send messages
-
-  window.addEventListener("DOMContentLoaded", () => {
-    // Check if the page is loaded in a wiki
-    if (msgTarget) {
-      msgTarget.postMessage({ action: "get-state" }, window.origin)
-    } else {
-      console.log("this is a top level window, there is no wiki to send messages to!")
-      //  TODO load a default game state here
-      chessObj = {
-        format: "PGN",
-        PGN: `
-            [SetUp "1"]
-            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"]`
-      }
-
-      chessObj.parsedPGN = new Pgn(chessObj.PGN)
-      initializeChess(chessObj); // Initialize chess with the chessObj
-    }
-  })
-
-  // Receive messages from wiki
-  window.addEventListener("message", event => {
-    const { action, chessObj } = event.data
-    console.log(chessObj)
-    switch (action) {
-      case "set-state":
-        console.log("I got the state!", chessObj)
-        initializeChess(chessObj)
-        break
-      default:
-        console.log("unknown message type:", action)
-        console.log({ chessObj })
-        break
-    }
-  })
-
-  // Send messages to wiki
-  function sendMessage(msg) {
-    if (msgTarget) {
-      console.log("sending message to wiki", msg)
-      msgTarget.postMessage(msg, "*")
-    } else {
-      console.log("this is a top level window, there is no wiki to send messages to")
-    }
-  }
-  // Send message to wiki when button is clicked
-  document.getElementById("sendMsg").addEventListener("click", () => {
-    sendMessage({ action: "refresh" })
-  })
-
-  function initializeChess(chessObj) {
-
-    const i18n = new I18n()
-    i18n.load({
-      de: { playerName: "Spieler" },
-      en: { playerName: "Player" },
-      fr: { playerName: "Joueur" }
-    })
-
-    if (chessObj.PGN) {
-      console.log("Initializing Chess Console with PGN")
-      try {
-        chessObj.parsedPGN = new Pgn(chessObj.PGN)
-        changePage("game") // Show the game page
-        if (typeof chessConsole === "undefined") {
-          console.log("I would like to show players", chessObj.parsedPGN.header.tags.Black, chessObj.parsedPGN.header.tags.White)
-          let { player: whitePlayer, type: whiteType } = configurePlayer(chessObj.parsedPGN.header.tags.White)
-          let { player: blackPlayer, type: blackType } = configurePlayer(chessObj.parsedPGN.header.tags.Black)
-          console.log("White Player:", whitePlayer, "Type:", whiteType)
-          console.log("Black Player:", blackPlayer, "Type:", blackType)
-          chessConsole = new ChessConsole(
-            document.getElementById("console-container"),
-            whitePlayer,
-            blackPlayer
-          )
-
-          new Board(chessConsole, {
-            assetsUrl: "./assets/",
-            position: FEN.empty,
-            style: {
-              cssClass: "green",
-              borderType: 'frame',
-              showCoordinates: true,
-              pieces: { file: "pieces/staunty.svg" }
-            }
-          }).initialized.then(() => {
-            new Persistence(chessConsole, {
-              savePrefix: "Stockfish"
-            }).load()
-
-            chessConsole.initGame({ pgn: chessObj.PGN })
-          })
-          new History(chessConsole)
-          new HistoryControl(chessConsole)
-          new CapturedPieces(chessConsole)
-
-          // if (whiteType === "stockfish" || blackType === "stockfish") {
-          //   new StockfishGameControl(chessConsole, { player: chessConsole.opponent })
-          //   new StockfishStateView(chessConsole, chessConsole.opponent)
-
-          // }
-          new GameStateOutput(chessConsole)
-          new Sound(chessConsole, { soundSpriteFile: "./assets/sounds/chess_console_sounds.mp3" })
-
-          console.log("HAHAHAHAH! we're in a function!")
-        }
-        else {
-          console.log("chessConsole already initialized")
-          chessConsole.initGame({ pgn: chessObj.PGN })
-        }
-      } catch (e) {
-        console.error("Error parsing PGN:", e)
-        chessObj.parsedPGN = null
-        changePage("error")
-        document.querySelector(".page#error").appendChild(document.createTextNode("Error parsing PGN: " + e.message))
-        document.querySelector(".page#error").appendChild(document.createElement("br"))
-        document.querySelector(".page#error").appendChild(document.createTextNode("Provided PGN: " + chessObj.PGN))
-        // sendMessage({
-        //   action: "error",
-        //   chessObj: chessObj,
-        // })
-      }
-    }
-    else if (chessObj.FEN) {
-      console.log("Initializing Chess Console with FEN")
-      changePage("position") // Show the position page
-      if (typeof fenEditor === "undefined") {
-        fenEditor = new FenEditor(document.querySelector(".cm-fen-editor"), {
-          boardTheme: "green",
-          assetsUrl: "./assets/",
-          piecesFile: "pieces/staunty.svg",
-          markers: MARKER_TYPE.square,
-          onFenChange: function (event) {
-            // console.log("onFenChange", event)
-          },
-          onPositionChange: function (event) {
-            // console.log("onPositionChange", event)
-          }
-        })
-      }
-      else {
-        console.log("Fen Editor already initialized")
-      }
-    }
-    else { // if format isn't know, start a standard game
-      chessObj = {
-        format: "PGN",
-        PGN: `
-            [SetUp "1"]
-            [FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"]`
-      }
-      initializeChess(chessObj); // Initialize chess with the chessObj
-    }
-  }
-
-  function configurePlayer(name) {
-    console.log(`Is Stockfish Level: `, name.slice(0, -1).toLowerCase().trim() === "stockfish level")
-    console.log(`level num`, 1 <= name.slice(-1) <= 8)
-    if (name.slice(0, -1).toLowerCase().trim() === "stockfish level" && 1 <= name.slice(-1) <= 8) {
-      return {
-        player: {
-          name: name,
-          type: StockfishPlayer,
-          props: {
-            worker: "./assets/js/stockfish-niklasf-v10.js",
-            book: "./assets/books/openings.bin",
-            level: parseInt(name.slice(-1)),
-            debug: false
-          }
-        },
-        type: "stockfish"
-      }
-    } else {
-      return {
-        player: {
-          name: name,
-          type: LocalPlayer
-        },
-        type: (window.location.hostname === name) ? "wiki" : "local"
-      }
-
-    }
-  }
-
-  // Change board position to fen
-  document.getElementById("fenButton").addEventListener("click", () => {
-    const fen = document.getElementById("fenInput").value
-    const pgn = `
-        [SetUp "1"]
-        [FEN "${fen}"]`
-
-    initializeChess({ format: "PGN", PGN: pgn }) // Initialize chess with the new FEN
-  })
-
-  // Copy to clipboard functionality
-  document.getElementById('copyFenBtn').addEventListener('click', async () => {
-    const fenInput = document.getElementById('fenInputOutput');
-    try {
-      await navigator.clipboard.writeText(fenInput.value);
-      // Visual feedback
-      const btn = document.getElementById('copyFenBtn');
-      const icon = btn.querySelector('i');
-      icon.classList.replace('fa-copy', 'fa-check');
-      setTimeout(() => {
-        icon.classList.replace('fa-check', 'fa-copy');
-      }, 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
-  })
-
-  // Function for changing page content
-  function changePage(page) {
-    const pages = document.getElementsByClassName("page");
-    // Hides all pages
-    Array.prototype.forEach.call(pages, (page) => {
-      page.style.display = "none";
-    });
-    // Shows the selected page
-    document.getElementById(page).style.display = "block";
-  }
-</script>
-
+    <!-- SCRIPTS -->
+    <script src="./assets/js/bootstrap.bundle.min.js"></script>
+    <script src="./assets/js/jquery-3.3.1.slim.min.js"></script>
+    <script src="./assets/js/bootstrap-auto-dark-mode.js"></script>
+    <script src="./assets/js/es-module-shims.min.js"></script>
+    <script type="module" src="./chess-app.js?v=1.1.2-pre.15+1784363678514"></script>
+  </body>
 </html>

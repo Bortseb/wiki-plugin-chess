@@ -1,8 +1,33 @@
-node_modules
-npm-debug.log
+# Dependencies & lockfile (install locally; not published)
+node_modules/
+package-lock.json
+
+# Hidden directories and local workspace files
+.*/
+!.github/
+*.code-workspace
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Generated client bundles (built from src/ via scripts/)
+/client/*.js
+/client/*.js.map
+!/client/service-worker.js
+/client/assets/js/stockfish-18-lite-single.*
+/client/assets/styles/cm-modules.css
+/client/assets/styles/cm-modules.css.map
+* copy.js
+* copy.map
+
+# Runtime / local farm artifacts
+coverage/
 status
 meta-client.json
-client/chess.js
-client/chess.js.map
-coverage
-package-lock.json
+*.tgz
+server/lichess_db_puzzle.*
+
+# Secondary project: Chess Academy garden (local-only; not part of the plugin)
+chess-learning-site/
