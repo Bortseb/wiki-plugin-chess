@@ -44,10 +44,6 @@ describe('guards · chess-app', () => {
       src,
       /export function proceedReturnToStartMenu\(\) \{\s*if \(app\.followsPopup\) \{\s*shellMessenger\(\)\?\.requestSwitchGameMode\(\)\s*reclaimSurfaceFromPopupFollow\(\)\s*\}\s*returnToStartMenu\(\)/,
     )
-    assert.match(
-      src,
-      /function proceedOpenPositionEditor\(fen\) \{\s*if \(app\.followsPopup\) \{\s*shellMessenger\(\)\?\.requestOpenPositionEditor\(\{ fen \}\)\s*reclaimSurfaceFromPopupFollow\(\)\s*\}\s*switchToPositionEditorFromGame\(fen\)/,
-    )
   })
 
   it('defines player bar HTML helpers in game.js view layer', () => {

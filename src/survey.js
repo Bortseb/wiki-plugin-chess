@@ -28,11 +28,13 @@ import {
   partitionOpenChallenges,
   formatChallengeRange,
   buildOpenChallenge,
+  stampOpenChallengePgn,
   openChallengeDisplayTitle,
   formatGameRowMetaLine,
   isOpenChallenge,
-  challengeRatingGate,
+  challengeJoinGate,
   CHALLENGE_COLOR_BLACK,
+  CHALLENGE_REJECT_OWNERS_ONLY,
   sitesMatch,
   rateGame,
   rateEngineGame,
@@ -61,10 +63,18 @@ import {
   buildLeaderboardFromPlayers,
   coerceBlockListMeta,
   harvestGhostOpenChallenge,
+  openChallengeUsesJoinGhost,
   mergeFederationSitesCache,
   normalizeFederationSitesCache,
   refreshFederationSitesFromIndex,
   normalizeNeighborhoodGraphOpts,
+  shouldShowIslandNotice,
+  normalizeSiteCrawlCache,
+  pruneSiteCrawlCache,
+  formatCrawlEtaLabel,
+  buildCrawlHits,
+  crawlHitSiteReferences,
+  crawlHitGameReferences,
 } from './federation.js'
 import {
   getPgnTag,
@@ -83,9 +93,11 @@ import {
   wikiSiteLinkLabel,
   normalizeWikiSite,
   gameStartInstant,
+  formatLocalISO8601,
 } from './chess-core.js'
 import {
   openChallengeEditModal,
+  openAlertModal,
   closeActiveModal,
   clearViewportBlockingModals,
   setAuthGatedButton,
@@ -131,7 +143,11 @@ let federationSyncTimer = null
 let deepAuditUnloadBound = false
 
 function deepAuditUnloadHandler(event) {
-  if (!lbDeepRefresh || !lbLoading) return
+  // Warn for deep audits and any in-flight Visible-federation crawl — closing cancels it.
+  if (!lbLoading) return
+  const surveyCrawl =
+    viewKind === 'federatedLeaderboard' && (lbDeepRefresh || mode === 'survey' || !!lbProgress?.hopGraph)
+  if (!surveyCrawl && !lbDeepRefresh) return
   event.preventDefault()
   event.returnValue = ''
   return ''
@@ -276,7 +292,26 @@ function federationIndexedDbPayload() {
     island: indexedDbMemory.meta?.island || null,
     knownFederationSites: indexedDbMemory.meta?.federationSites || null,
     knownOpponents: Array.isArray(indexedDbMemory.meta?.pastOpponents) ? indexedDbMemory.meta.pastOpponents : [],
+    siteCrawlCache: normalizeSiteCrawlCache(indexedDbMemory.meta?.siteCrawlCache),
   }
+}
+
+let siteCrawlCachePersistTimer = null
+function rememberSiteCrawlCache(cache) {
+  const next = pruneSiteCrawlCache({
+    ...normalizeSiteCrawlCache(indexedDbMemory.meta?.siteCrawlCache),
+    ...normalizeSiteCrawlCache(cache),
+  })
+  indexedDbMemory.meta.siteCrawlCache = next
+  if (typeof window === 'undefined') {
+    void persistRatingPlayers()
+    return
+  }
+  if (siteCrawlCachePersistTimer) clearTimeout(siteCrawlCachePersistTimer)
+  siteCrawlCachePersistTimer = window.setTimeout(() => {
+    siteCrawlCachePersistTimer = null
+    void persistRatingPlayers()
+  }, 400)
 }
 
 export function readNeighborhoodHopGraph() {
@@ -991,6 +1026,12 @@ let lbProgress = null
 // True when the current request is a full deep recompute (no checkpoint shortcut).
 let lbDeepRefresh = false
 let lbBackground = false
+// Foreground Visible-federation crawl — show a whole-window OK alert when it finishes,
+// even if the user left #leaderboard or switched plugin modes meanwhile.
+let notifySurveyCrawlOnComplete = false
+// Shown for the whole Visible-federation crawl (status + footer), not only the first paint.
+const SURVEY_CRAWL_KEEP_OPEN_HINT =
+  'Leave this open — the crawl keeps running in the background. Do not close this tab or window.'
 // Per-mode cache of the last shell reply: { entries, meta } or null for each board.
 const lbBoardCache = { mine: null, neighborhood: null, survey: null }
 const SITE_SURVEY_CACHE_TTL_MS = 5 * 60 * 1000
@@ -1443,6 +1484,9 @@ export function showLeaderboardForItem() {
 export function handleLeaderboardProgress(data) {
   if (!data || Number(data.seq) !== boardRequestSeq) return
   lbProgress = data
+  if (data?.siteCrawlCache && typeof data.siteCrawlCache === 'object') {
+    rememberSiteCrawlCache(data.siteCrawlCache)
+  }
   const now = Date.now()
   if (
     handleLeaderboardProgress._lastPaint &&
@@ -1487,6 +1531,9 @@ export function handleLeaderboardData(data) {
     if (meta?.island && typeof meta.island === 'object') {
       indexedDbMemory.meta.island = meta.island
     }
+    if (meta?.siteCrawlCache && typeof meta.siteCrawlCache === 'object') {
+      rememberSiteCrawlCache(meta.siteCrawlCache)
+    }
     void persistRatingPlayers()
   } else if (entries.length) {
     const players = {}
@@ -1530,7 +1577,12 @@ export function handleLeaderboardData(data) {
     if (meta?.island && typeof meta.island === 'object') {
       indexedDbMemory.meta.island = meta.island
     }
+    if (meta?.siteCrawlCache && typeof meta.siteCrawlCache === 'object') {
+      rememberSiteCrawlCache(meta.siteCrawlCache)
+    }
     void persistRatingPlayers()
+  } else if (meta?.siteCrawlCache && typeof meta.siteCrawlCache === 'object') {
+    rememberSiteCrawlCache(meta.siteCrawlCache)
   }
   // Always cache the canonical visible-federation board; mode views are filters over it.
   if (meta?.surveyEntries?.length) storeSurveyBoardCache(meta.surveyEntries, meta)
@@ -1549,6 +1601,8 @@ export function handleLeaderboardData(data) {
     return
   }
   const wasBackground = lbBackground
+  const shouldNotifySurveyCrawl = notifySurveyCrawlOnComplete && !wasBackground
+  notifySurveyCrawlOnComplete = false
   lbLoading = false
   lbProgress = null
   lbDeepRefresh = false
@@ -1582,7 +1636,15 @@ export function handleLeaderboardData(data) {
   } else if (!meta?.openChallengesPending) {
     openChallengesLoading = false
   }
-  if (!isLeaderboardPageVisible()) return
+  if (shouldNotifySurveyCrawl) notifyVisibleFederationCrawlComplete()
+  if (!isLeaderboardPageVisible()) {
+    // Crawl finished while the user was elsewhere — drop shell unload/loading chrome.
+    bindDeepAuditUnload(false)
+    if (ctx?.wikiFrame && !ctx?.followsPopup) {
+      shellMessenger()?.fetchUi({ loading: false, deep: false, warnUnload: false })
+    }
+    return
+  }
   renderLeaderboard()
   // Hop-bounded visible-federation crawls never match full-federation checkpoints;
   // following queueAudit would restart a deep sync that wipes hop stats and loops.
@@ -1593,6 +1655,19 @@ export function handleLeaderboardData(data) {
       syncSurvey: mode === 'survey',
     })
   }
+}
+
+function notifyVisibleFederationCrawlComplete() {
+  const title = 'Visible federation crawl complete'
+  const message =
+    'The Visible federation crawl finished. Return to Chess Leaderboards anytime to see the updated ratings.'
+  // Wiki embed: parent-window overlay so it grabs attention even on another lineup page
+  // or after leaveFederationViews() cleared in-iframe modals.
+  if (ctx?.wikiFrame && !isInAppSurveySurface()) {
+    shellMessenger()?.alertUi({ title, message, okLabel: 'OK' })
+    return
+  }
+  openAlertModal({ title, message, okLabel: 'OK' })
 }
 
 // Kick deferred site-survey enrich + open-challenge crawl (shell or PWA bridge).
@@ -1715,28 +1790,32 @@ export function handleSurveyOpenChallengesData(data) {
   renderLeaderboard()
 }
 
-function abandonLeaderboardRequest() {
-  boardRequestSeq += 1
-  surveyOpenChallengesSeq += 1
-  lbLoading = false
-  openChallengesLoading = false
-  lbProgress = null
-  lbDeepRefresh = false
-  bindDeepAuditUnload(false)
-  if (ctx?.wikiFrame && !ctx?.followsPopup) {
-    shellMessenger()?.fetchUi({ loading: false, deep: false })
-  }
-}
-
-// Cancel in-flight neighborhood fetches and tear down gate/loading UI when leaving #leaderboard.
+// Tear down gate/modals when leaving #leaderboard — keep in-flight Visible-federation
+// crawls running so the user can browse elsewhere and return to a finished board.
 export function leaveFederationViews() {
-  abandonLeaderboardRequest()
   leaderboardUi?.closeGate?.()
   clearViewportBlockingModals()
   checkingRatedStatus = false
-  shellMessenger()?.abandonFetches()
+  // Do not abandonFetches / bump boardRequestSeq — late progress and data still apply
+  // to IndexedDB and board caches while the wiki tab stays open.
+  if (ctx?.wikiFrame && !ctx?.followsPopup && lbLoading) {
+    const warnUnload =
+      lbDeepRefresh || (viewKind === 'federatedLeaderboard' && (mode === 'survey' || !!lbProgress?.hopGraph))
+    shellMessenger()?.fetchUi({ loading: true, deep: lbDeepRefresh, warnUnload })
+  }
+}
+
+// Shell edit / explicit cancel — crawl is aborted; do not alert on a late orphan reply.
+export function abandonInFlightFetches() {
+  notifySurveyCrawlOnComplete = false
+  lbLoading = false
+  lbProgress = null
+  lbDeepRefresh = false
+  lbBackground = false
+  bindDeepAuditUnload(false)
+  leaveFederationViews()
   if (ctx?.wikiFrame && !ctx?.followsPopup) {
-    shellMessenger()?.fetchUi({ loading: false, deep: false })
+    shellMessenger()?.fetchUi({ loading: false, deep: false, warnUnload: false })
   }
 }
 
@@ -1874,8 +1953,22 @@ export function requestBoard({
   syncSurvey = false,
   refreshOpenChallenges = false,
   extraNeighborhoodSites = null,
+  restart = false,
 } = {}) {
   const effectiveMode = syncSurvey ? 'survey' : mode
+  // Returning to the leaderboard (or a soft reopen) must not abort an in-flight crawl.
+  // Explicit Refresh / hop-dial recrawl pass restart: true.
+  if (
+    lbLoading &&
+    !restart &&
+    !deepRecompute &&
+    effectiveMode === mode &&
+    (viewKind === 'federatedLeaderboard' || viewKind === 'siteSurvey')
+  ) {
+    ensureLeaderboardShellInteractive()
+    if (!background) renderLeaderboard()
+    return
+  }
   boardRequestSeq += 1
   const seq = boardRequestSeq
   if (refreshOpenChallenges && isSiteSurveyAllSurface()) {
@@ -1887,6 +1980,12 @@ export function requestBoard({
   const neighborhoodExtras = Array.isArray(extraNeighborhoodSites) ? extraNeighborhoodSites.filter(Boolean) : []
   const showProgress = !background && (lbDeepRefresh || effectiveMode === 'survey' || effectiveMode === 'neighborhood')
   const hopDial = effectiveMode === 'survey' ? readNeighborhoodHopGraph() : null
+  // Arm once per foreground Visible-federation crawl; cleared when LEADERBOARD_DATA arrives.
+  if (!background && viewKind === 'federatedLeaderboard' && effectiveMode === 'survey') {
+    notifySurveyCrawlOnComplete = true
+  } else if (!background) {
+    notifySurveyCrawlOnComplete = false
+  }
   lbProgress = showProgress
     ? {
         phase: 'start',
@@ -1898,8 +1997,8 @@ export function requestBoard({
             : effectiveMode === 'mine'
               ? 'Reading rated games on your site…'
               : hopDial
-                ? `Walking visible federation (max ${hopDial.maxHops} hops, decay ${hopDial.hopDecay})…`
-                : 'Updating federation ratings…',
+                ? `Walking visible federation (max ${hopDial.maxHops} hops, decay ${hopDial.hopDecay})… ${SURVEY_CRAWL_KEEP_OPEN_HINT}`
+                : `Updating federation ratings… ${SURVEY_CRAWL_KEEP_OPEN_HINT}`,
         deepRecompute: lbDeepRefresh,
         startedAt: Date.now(),
         elapsedMs: 0,
@@ -1984,7 +2083,10 @@ export function requestBoard({
     lbLoading = true
     renderLeaderboard()
   }
-  bindDeepAuditUnload(false)
+  const warnUnload =
+    lbLoading &&
+    (lbDeepRefresh || (effectiveMode === 'survey' && viewKind === 'federatedLeaderboard'))
+  bindDeepAuditUnload(warnUnload)
   if (bridgeSiteSurvey || bridgeFederatedBoard) {
     if (lbMeta?.hasRatedGame != null) siteHasRatedGame = !!lbMeta.hasRatedGame
     else checkingRatedStatus = false
@@ -2063,6 +2165,7 @@ function siteSurveySeekEntry(itemId) {
     viewingSite: ctx?.viewingSite?.() || lbMeta?.site || lbMeta?.host || '',
     viewerRating: ctx?.viewerRating?.(),
     acceptedGhosts: lbMeta?.acceptedGhosts || [],
+    isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
   })
   return [...acceptedMine, ...directedAtMe, ...mine, ...joinable].find(row => String(row?.itemId || '') === id) || null
 }
@@ -2118,6 +2221,7 @@ export function wireLeaderboardView() {
     // Soft refresh: past opponents re-read this site only; visible federation uses checkpoints.
     requestBoard({
       force: true,
+      restart: true,
       deepRecompute: false,
       syncSurvey: mode === 'survey',
       refreshOpenChallenges: isSiteSurveyAllSurface(),
@@ -2343,7 +2447,10 @@ export function renderLeaderboard() {
   renderSurveyUpdate()
   ctx?.notifyWikiHeight?.()
   if (ctx?.wikiFrame && !ctx?.followsPopup) {
-    shellMessenger()?.fetchUi({ loading: lbLoading, deep: lbDeepRefresh })
+    const warnUnload =
+      lbLoading &&
+      (lbDeepRefresh || (viewKind === 'federatedLeaderboard' && (mode === 'survey' || !!lbProgress?.hopGraph)))
+    shellMessenger()?.fetchUi({ loading: lbLoading, deep: lbDeepRefresh, warnUnload })
   }
 }
 
@@ -2351,12 +2458,13 @@ function renderIslandNotice() {
   const notice = el('wikiChessLbIslandNotice')
   if (!notice) return
   const isAllProbe = viewKind === 'siteSurvey' && siteProbeKind === 'all'
-  const state = String(lbMeta?.island?.state || indexedDbMemory.meta?.island?.state || '').trim()
-  if (!isAllProbe || (state !== 'isolated' && state !== 'shifted')) {
+  const island = lbMeta?.island || indexedDbMemory.meta?.island
+  if (!isAllProbe || !shouldShowIslandNotice(island)) {
     notice.hidden = true
     notice.textContent = ''
     return
   }
+  const state = String(island?.state || '').trim()
   notice.hidden = false
   notice.textContent =
     state === 'isolated'
@@ -2364,11 +2472,166 @@ function renderIslandNotice() {
       : 'The federation pool you are connected to may have shifted — cross-wiki ratings may not match peers yet.'
 }
 
+function formatCrawlDuration(ms) {
+  const sec = Math.max(0, Math.round(Number(ms) || 0) / 1000)
+  if (sec < 60) return `${Math.max(1, Math.round(sec))}s`
+  const min = Math.floor(sec / 60)
+  const rem = Math.round(sec % 60)
+  return rem ? `${min}m ${rem}s` : `${min}m`
+}
+
 function renderSurveyUpdate() {
   const wrap = el('wikiChessLbSurveyUpdate')
   if (!wrap) return
-  wrap.hidden = true
+  const isFederated = viewKind === 'federatedLeaderboard' && mode === 'survey'
+  // Keep the leave-open line for the whole Visible-federation crawl, even if the user
+  // switches to Past opponents / Neighborhood while it runs.
+  const surveyCrawlInFlight = lbLoading && notifySurveyCrawlOnComplete
+  if (!isFederated && !surveyCrawlInFlight) {
+    wrap.hidden = true
+    wrap.replaceChildren()
+    return
+  }
+
+  if (surveyCrawlInFlight || (lbLoading && isFederated)) {
+    const hostsDone = Math.max(0, Number(lbProgress?.hostIndex) || 0)
+    const hostTotal = Math.max(hostsDone, Number(lbProgress?.hostTotal) || 0)
+    const gamesFound = Math.max(0, Number(lbProgress?.gamesFound) || 0)
+    const eta = formatCrawlEtaLabel(lbProgress?.elapsedMs, hostsDone, hostTotal)
+    const stats = lbProgress?.crawlStats || {}
+    const cacheHits = Math.max(0, Number(stats.cacheHits) || 0)
+    const parts = [
+      hostTotal > 0 ? `Sites ${hostsDone}/${hostTotal}` : null,
+      gamesFound ? `${gamesFound} games found` : null,
+      cacheHits ? `${cacheHits} cache hit${cacheHits === 1 ? '' : 's'}` : null,
+      eta || null,
+    ].filter(Boolean)
+    wrap.hidden = false
+    wrap.textContent = (parts.length ? `${parts.join(' · ')}. ` : '') + SURVEY_CRAWL_KEEP_OPEN_HINT
+    return
+  }
+
+  const stats = lbMeta?.crawlStats || null
+  const timing = lbMeta?.timing || null
+  if (!stats && !timing) {
+    wrap.hidden = true
+    wrap.replaceChildren()
+    return
+  }
+  const hits = resolveCrawlHits()
+  const sites = Math.max(
+    0,
+    hits.sites.length || Number(lbMeta?.crawled) || Number(stats?.sitesCrawled) || 0,
+  )
+  const games = Math.max(0, hits.games.length || Number(timing?.gamesFetched) || 0)
+  const cacheHits = Math.max(
+    0,
+    hits.cacheHitSites.length || Number(stats?.cacheHits) || 0,
+  )
+  const pagesFetched = Math.max(0, Number(stats?.pagesFetched) || 0)
+  const duration = timing?.totalMs != null ? formatCrawlDuration(timing.totalMs) : ''
+  const parts = []
+  if (sites) {
+    parts.push(
+      crawlStatLink({
+        kind: 'sites',
+        label: `${sites} site${sites === 1 ? '' : 's'} crawled`,
+        enabled: hits.sites.length > 0 && canShowCrawlHitsGhost(),
+      }),
+    )
+  }
+  if (games) {
+    parts.push(
+      crawlStatLink({
+        kind: 'games',
+        label: `${games} game${games === 1 ? '' : 's'} found`,
+        enabled: hits.games.length > 0 && canShowCrawlHitsGhost(),
+      }),
+    )
+  }
+  if (cacheHits) {
+    parts.push(
+      crawlStatLink({
+        kind: 'cache',
+        label: `${cacheHits} site${cacheHits === 1 ? '' : 's'} reused from cache`,
+        enabled: hits.cacheHitSites.length > 0 && canShowCrawlHitsGhost(),
+      }),
+    )
+  }
+  if (pagesFetched) parts.push(document.createTextNode(`${pagesFetched} page${pagesFetched === 1 ? '' : 's'} fetched`))
+  if (duration) parts.push(document.createTextNode(`in ${duration}`))
+  if (!parts.length) {
+    wrap.hidden = true
+    wrap.replaceChildren()
+    return
+  }
+  wrap.hidden = false
   wrap.replaceChildren()
+  wrap.append(document.createTextNode('Last crawl: '))
+  parts.forEach((part, i) => {
+    if (i) wrap.append(document.createTextNode(' · '))
+    wrap.append(part)
+  })
+  wrap.append(document.createTextNode('.'))
+}
+
+function canShowCrawlHitsGhost() {
+  return Boolean(ctx?.wikiFrame && !isInAppSurveySurface())
+}
+
+function resolveCrawlHits() {
+  const raw = lbMeta?.crawlHits
+  if (raw && typeof raw === 'object') {
+    return {
+      sites: Array.isArray(raw.sites) ? raw.sites.map(cleanSite).filter(Boolean) : [],
+      cacheHitSites: Array.isArray(raw.cacheHitSites) ? raw.cacheHitSites.map(cleanSite).filter(Boolean) : [],
+      games: Array.isArray(raw.games) ? raw.games : [],
+    }
+  }
+  const sites = Array.isArray(lbMeta?.crawledSites)
+    ? lbMeta.crawledSites
+    : Array.isArray(lbMeta?.listed)
+      ? lbMeta.listed
+      : []
+  return buildCrawlHits({
+    sites,
+    cacheHitSites: lbMeta?.crawlStats?.cacheHitSites,
+    siteCrawlCache: lbMeta?.siteCrawlCache || indexedDbMemory.meta?.siteCrawlCache,
+  })
+}
+
+function crawlStatLink({ kind, label, enabled }) {
+  if (!enabled) return document.createTextNode(label)
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'btn btn-link btn-sm p-0 align-baseline wiki-chess-lb-crawl-stat-link'
+  btn.textContent = label
+  btn.title = 'Open a ghost page listing these crawl hits'
+  btn.addEventListener('click', () => openCrawlHitsGhost(kind))
+  return btn
+}
+
+function openCrawlHitsGhost(kind) {
+  if (!canShowCrawlHitsGhost()) return
+  const hits = resolveCrawlHits()
+  let title = 'Crawl hits'
+  let intro = ''
+  let references = []
+  if (kind === 'games') {
+    references = crawlHitGameReferences(hits.games)
+    title = `Games found (${references.length})`
+    intro = `Chess game pages discovered in the last Visible federation crawl (${references.length}).`
+  } else if (kind === 'cache') {
+    references = crawlHitSiteReferences(hits.cacheHitSites)
+    title = `Sites reused from cache (${references.length})`
+    intro = `Sites whose sitemap cache was reused in the last Visible federation crawl (${references.length}).`
+  } else {
+    references = crawlHitSiteReferences(hits.sites)
+    title = `Sites crawled (${references.length})`
+    intro = `Wiki sites visited in the last Visible federation crawl (${references.length}).`
+  }
+  if (!references.length) return
+  shellMessenger()?.showCrawlHitsPage({ title, intro, references })
 }
 
 function renderSiteSurveyActions() {
@@ -2423,6 +2686,7 @@ function siteSurveyOpenChallengeRows() {
     viewingSite: ctx?.viewingSite?.() || lbMeta?.site || lbMeta?.host || '',
     viewerRating: ctx?.viewerRating?.(),
     acceptedGhosts: lbMeta?.acceptedGhosts || [],
+    isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
   })
   return [...seekAccepted, ...seekDirected, ...seekMine, ...seekJoinable]
 }
@@ -2653,6 +2917,15 @@ function boardSeatLabels(g) {
 function appendPlayerNameEl(parent, label, rawTag) {
   parent.className = 'wiki-chess-lb-game-seat-name'
   const parsed = rawTag ? parsePlayerId(rawTag) : null
+  const engineLevel = parseStockfishLevel(parsed?.isEngine ? parsed.username : label)
+  if (engineLevel != null) {
+    parent.append('Stockfish ')
+    const detail = document.createElement('span')
+    detail.className = 'wiki-chess-wiki-site-label'
+    detail.textContent = `Level ${engineLevel} (${stockfishLevelElo(engineLevel)})`
+    parent.appendChild(detail)
+    return
+  }
   if (parsed?.domain && !parsed.isEngine) {
     parent.append(`${parsed.username} `)
     const domain = document.createElement('span')
@@ -2727,14 +3000,34 @@ function appendGameMeta(text, g) {
   if (sub.childNodes.length) text.appendChild(sub)
 }
 
-// Local start time from the PGN UTCDate/UTCTime tags; '' for games created before
-// start instants were stamped.
-function gameStartTimeLabel(g) {
+// PGN Date "YYYY.MM.DD" → compact list label "YY-MM-DD".
+function formatGameDateShort(date) {
+  const m = String(date || '')
+    .trim()
+    .match(/^(\d{4})\.(\d{2})\.(\d{2})$/)
+  if (!m) return String(date || '').trim()
+  return `${m[1].slice(-2)}-${m[2]}-${m[3]}`
+}
+
+// Hover details for the date column: full start/end instants when the PGN carries them.
+function gameDateHoverTitle(g) {
+  const lines = []
   const utcDate = g.utcDate || (g.pgn ? getPgnTag(g.pgn, 'UTCDate') : '') || ''
   const utcTime = g.utcTime || (g.pgn ? getPgnTag(g.pgn, 'UTCTime') : '') || ''
-  const instant = gameStartInstant({ utcDate, utcTime })
-  if (!instant) return ''
-  return instant.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const start = gameStartInstant({ utcDate, utcTime })
+  if (start) {
+    lines.push(`Started: ${formatLocalISO8601(start)}`)
+  } else {
+    const date = String(g.date || '').trim()
+    if (date) lines.push(`Started: ${date}`)
+  }
+  const endRaw =
+    (g.pgn ? getPgnTag(g.pgn, 'TerminationTimestamp') : '') || g.terminationTimestamp || ''
+  const endMs = Date.parse(String(endRaw).trim())
+  if (Number.isFinite(endMs)) {
+    lines.push(`Ended: ${formatLocalISO8601(new Date(endMs))}`)
+  }
+  return lines.join('\n')
 }
 
 function gameLinkFor(g) {
@@ -2769,29 +3062,15 @@ function gameLinkFor(g) {
   const resultCol = document.createElement('span')
   resultCol.className = 'wiki-chess-lb-game-result-col'
   resultCol.appendChild(result)
-  // Start date (and time when the PGN carries it) sits under the badge so the
-  // player names get the full text column.
+  // Compact start date under the badge; full start/end instants on hover.
   const date = String(g.date || '').trim()
   if (date) {
     const dateEl = document.createElement('span')
     dateEl.className = 'wiki-chess-lb-game-date'
-    // <wbr> after each PGN dot lets "2026.07.17" wrap inside the narrow badge
-    // column without adding characters to copied text.
-    date.split('.').forEach((part, i) => {
-      if (i) {
-        dateEl.append('.')
-        dateEl.appendChild(document.createElement('wbr'))
-      }
-      dateEl.append(part)
-    })
+    dateEl.textContent = formatGameDateShort(date)
+    const hover = gameDateHoverTitle(g)
+    if (hover) dateEl.title = hover
     resultCol.appendChild(dateEl)
-    const time = gameStartTimeLabel(g)
-    if (time) {
-      const timeEl = document.createElement('span')
-      timeEl.className = 'wiki-chess-lb-game-time'
-      timeEl.textContent = time
-      resultCol.appendChild(timeEl)
-    }
   }
 
   const text = document.createElement('span')
@@ -2828,13 +3107,14 @@ export function keepSiteSurveySnapshotOnReturn() {
 
 // After the owner posts a seek, paint it in Open Challenges immediately instead of
 // waiting for a federation crawl to rediscover their own survey-metadata row.
-export function addPostedOpenChallengeLocally({ itemId, pgn, title, challenge, site } = {}) {
+export function addPostedOpenChallengeLocally({ itemId, pgn, title, challenge, site, slug } = {}) {
   const entry = harvestGhostOpenChallenge({
     itemId,
     pgn,
     title,
     challenge,
     site: site || ctx?.viewingSite?.() || challenge?.creator?.site,
+    slug,
   })
   if (!entry) return false
 
@@ -2918,21 +3198,13 @@ function canManageOpenChallenge(entry) {
   return Boolean(viewingSite && entrySite && sitesMatch(entrySite, viewingSite))
 }
 
-function shouldGhostJoinOpenChallenge(entry, { pgn = '', host = '' } = {}) {
-  if (entry?.accepted && entry?.acceptedGame?.slug) return false
+function shouldGhostJoinOpenChallenge(entry, { pgn = '', host: _host = '' } = {}) {
   if (canManageOpenChallenge(entry)) return false
   const challenge = entry?.challenge
   const ghostPgn = String(entry?.pgn || pgn || '').trim()
   if (!challenge || !isOpenChallenge(challenge) || !ghostPgn) return false
-  // Pending seeks (survey metadata) always fork a new game page for the joiner.
-  if (entry?.pending) return true
-  const viewingSite = String(ctx?.viewingSite?.() || '')
-    .trim()
-    .toLowerCase()
-  const remoteSite = String(entry?.site ?? entry?.host ?? host ?? '')
-    .trim()
-    .toLowerCase()
-  return Boolean(remoteSite && viewingSite && !sitesMatch(remoteSite, viewingSite))
+  // Pending survey-metadata seeks → join ghost. Page-backed (slug) → open real page.
+  return openChallengeUsesJoinGhost(entry)
 }
 
 function dispatchOpenChallengeSeekClick(link, entry, { append = false } = {}) {
@@ -2963,12 +3235,13 @@ function dispatchOpenChallengeSeekClick(link, entry, { append = false } = {}) {
   })
 }
 
-function applySurveyOpenChallengeEdit(entry, { rated, creatorColor, minRating, maxRating }) {
+function applySurveyOpenChallengeEdit(entry, { rated, allowGuests, creatorColor, minRating, maxRating }) {
   const challenge = entry?.challenge
   if (!challenge || !entry.itemId || !entry.pgn) return
 
   const updated = buildOpenChallenge({
     rated,
+    allowGuests,
     creatorColor,
     minRating,
     maxRating,
@@ -2984,6 +3257,7 @@ function applySurveyOpenChallengeEdit(entry, { rated, creatorColor, minRating, m
   const current = formatPgn(entry.pgn)
   let next = setPgnTag(current, creatorSeat, updated.creator.id)
   next = formatPgn(setPgnTag(next, openSeat, ''))
+  next = stampOpenChallengePgn(next, updated)
 
   shellMessenger()?.challengeChanged({
     challenge: updated,
@@ -3007,6 +3281,7 @@ function openOwnOpenChallengeModal(entry) {
     {
       title: entry.title || 'Open challenge',
       rated: cfg.rated,
+      allowGuests: cfg.allowGuests !== false,
       creatorColor: cfg.creatorColor,
       minRating: cfg.minRating,
       maxRating: cfg.maxRating,
@@ -3017,6 +3292,9 @@ function openOwnOpenChallengeModal(entry) {
           ghostItemId: entry.itemId,
         })
         removePostedOpenChallengeLocally(entry.itemId)
+        // Nested confirm discard restores mount; belt-and-suspenders if that path missed.
+        ensureMountContentVisible('#leaderboard .container-fluid')
+        ctx?.notifyWikiHeight?.()
       },
     },
     () => ctx?.notifyWikiHeight?.(),
@@ -3072,7 +3350,13 @@ function siteSeekRowFor(entry) {
   const cfg = challenge?.config || {}
   const own = canManageOpenChallenge(entry) || Boolean(entry?.accepted)
   const isAccepted = Boolean(entry?.accepted && entry?.acceptedGame?.slug)
-  const gate = challenge && !isAccepted ? challengeRatingGate(challenge, ctx?.viewerRating?.()) : { ok: false }
+  const gate =
+    challenge && !isAccepted
+      ? challengeJoinGate(challenge, {
+          viewerRating: ctx?.viewerRating?.(),
+          isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
+        })
+      : { ok: false }
   const canJoin = !own && !isAccepted && gate.ok
   const li = document.createElement('li')
   li.className = 'wiki-chess-lb-game-row'
@@ -3181,17 +3465,28 @@ function renderLbStatus() {
   }
   status.hidden = false
   if (lbLoading) {
-    if (lbProgress?.message) {
-      status.innerHTML = `<i class="fas fa-spinner fa-spin fa-fw" aria-hidden="true"></i> ${lbProgress.message}`
-      return
+    let msg = lbProgress?.message
+    if (!msg) {
+      msg = isSite
+        ? 'Loading your chess games…'
+        : mode === 'survey'
+          ? 'Updating federation ratings…'
+          : mode === 'neighborhood'
+            ? 'Filtering saved ratings for your wiki neighbourhood…'
+            : 'Reading rated games on your site…'
     }
-    const msg = isSite
-      ? 'Loading your chess games…'
-      : mode === 'survey'
-        ? 'Updating federation ratings…'
-        : mode === 'neighborhood'
-          ? 'Filtering saved ratings for your wiki neighbourhood…'
-          : 'Reading rated games on your site…'
+    if (lbProgress && mode === 'survey' && !isSite) {
+      const hostsDone = Math.max(0, Number(lbProgress.hostIndex) || 0)
+      const hostTotal = Math.max(hostsDone, Number(lbProgress.hostTotal) || 0)
+      const eta = formatCrawlEtaLabel(lbProgress.elapsedMs, hostsDone, hostTotal)
+      // Shell progress messages replace the start copy — keep ETA + leave-open hint attached.
+      if (eta && !String(msg).includes(eta)) {
+        msg = `${String(msg).replace(/\u2026$/, '')} — ${eta}`
+      }
+      if (!String(msg).includes('Leave this open')) {
+        msg = `${msg} ${SURVEY_CRAWL_KEEP_OPEN_HINT}`
+      }
+    }
     status.innerHTML = `<i class="fas fa-spinner fa-spin fa-fw" aria-hidden="true"></i> ${msg}`
     return
   }
@@ -3275,5 +3570,6 @@ function challengeRejectNote(reason, cfg) {
   if (reason === 'rating-below-min') return `Min ${cfg.minRating}`
   if (reason === 'rating-above-max') return `Max ${cfg.maxRating}`
   if (reason === 'rating-unknown') return 'Rating required'
+  if (reason === CHALLENGE_REJECT_OWNERS_ONLY) return cfg?.rated ? 'Owners only (rated)' : 'Owners only'
   return "Can't join"
 }

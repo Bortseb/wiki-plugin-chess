@@ -128,6 +128,13 @@ async function buildClientBundles() {
   function stampIndexHtmlCacheBust(html, stamp) {
     let out = String(html)
     out = out.replace(/src="\.\/chess-app\.js(?:\?v=[^"]*)?"/, `src="./chess-app.js?v=${stamp}"`)
+    // modulepreload hints (see index.html): keep their ?v= in lockstep with the
+    // script src above and the cm-modules import specifier stamped in chess-app.js.
+    out = out.replace(/href="\.\/chess-app\.js(?:\?v=[^"]*)?"/, `href="./chess-app.js?v=${stamp}"`)
+    out = out.replace(
+      /href="\.\/cm-modules-bundle\.js(?:\?v=[^"]*)?"/,
+      `href="./cm-modules-bundle.js?v=${stamp}"`,
+    )
     out = out.replace(
       /href="\.\/assets\/styles\/wiki-chess\.css(?:\?v=[^"]*)?"/,
       `href="./assets/styles/wiki-chess.css?v=${stamp}"`,

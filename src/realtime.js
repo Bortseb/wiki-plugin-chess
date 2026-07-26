@@ -19,6 +19,7 @@ import {
   getHumanPlayMode,
   HUMAN_PLAY_CORRESPONDENCE,
   isSameDeviceHumanPlay,
+  isDemoOrLessonGame,
   getPgnTag,
   normalizeWikiSite,
   opponentWikiSiteFromPgn,
@@ -33,6 +34,7 @@ import {
   formatGameResultSentence,
   getFormat,
   prepareWikiPgn,
+  mergePgnWithSavedHeaders,
   mergeGameSettings,
   shouldKeepActiveShellSync,
   isStaleGhostChooseShellSync,
@@ -297,10 +299,11 @@ let rtcCooldownUntil = 0
 const RTC_HANDSHAKE_TIMEOUT_MS = 30000
 const RTC_RETRY_COOLDOWN_MS = 60000
 
-// True for correspondence human-vs-human (not same-device).
+// True for correspondence human-vs-human (not same-device / demo lesson).
 export function isRemoteHumanGame() {
   const pgn = realtimeCtx.chessState?.PGN || realtimeCtx.chessState?.chessState
   if (!pgn || isSameDeviceHumanPlay(realtimeCtx.chessState)) return false
+  if (isDemoOrLessonGame(pgn)) return false
   return getHumanPlayMode(pgn) === HUMAN_PLAY_CORRESPONDENCE
 }
 
@@ -1250,7 +1253,13 @@ export function applySyncedPosition(incoming) {
       return
     }
 
-    chessState().PGN = prepareWikiPgn(chessState().PGN || chessState().chessState, chessState())
+    {
+      const livePgn = chessState().PGN || chessState().chessState
+      chessState().PGN = prepareWikiPgn(
+        mergePgnWithSavedHeaders(livePgn, chessState().wikiItemText || livePgn),
+        chessState(),
+      )
+    }
     const board = chessConsole.components.board
     // Same PGN as the live board (own journal echo / shell re-push): never initGame or
     // setPosition(false) — that aborts Stockfish and cancels in-flight piece animations.

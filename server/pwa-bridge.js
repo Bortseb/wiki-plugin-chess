@@ -53,6 +53,7 @@ export function federationIndexedDbOptsFromPayload(data = {}) {
     island: data?.island,
     knownOpponents: Array.isArray(data?.knownOpponents) ? data.knownOpponents : undefined,
     knownFederationSites: data?.knownFederationSites,
+    siteCrawlCache: data?.siteCrawlCache,
   }
 }
 
@@ -402,7 +403,8 @@ export function resolveWikiFaviconPath(argv = {}) {
   }
 }
 
-// Manifest icons: bundled 192/512 satisfy install checks; site favicon is the installed-app shortcut icon.
+// Manifest icons: prefer the wiki flag when it is install-sized (≥192); always keep
+// bundled 192/512 so Chrome's installability checks still pass for small site favicons.
 export function chessInstallManifestIcons(pluginBase = '/plugins/chess/', { faviconPath } = {}) {
   const bundled192 = {
     src: `${pluginBase}icon-192.png`,
@@ -416,7 +418,6 @@ export function chessInstallManifestIcons(pluginBase = '/plugins/chess/', { favi
     type: 'image/png',
     purpose: 'any',
   }
-  const icons = [bundled192]
 
   let faviconIcon = null
   if (faviconPath) {
@@ -437,18 +438,16 @@ export function chessInstallManifestIcons(pluginBase = '/plugins/chess/', { favi
     }
   }
 
-  if (faviconIcon) {
-    const [w, h] = faviconIcon.sizes.split('x').map(Number)
-    if (w >= 512 && h >= 512) {
-      icons.push(faviconIcon, bundled512)
-    } else {
-      icons.push(bundled512, faviconIcon)
-    }
-  } else {
-    icons.push(bundled512)
-  }
+  if (!faviconIcon) return [bundled192, bundled512]
 
-  return icons
+  const [w, h] = faviconIcon.sizes.split('x').map(Number)
+  // Large enough for the home-screen slot — lead with the wiki flag; keep bundled
+  // sizes as installability fallbacks.
+  if (w >= 192 && h >= 192) {
+    return [faviconIcon, bundled192, bundled512]
+  }
+  // Small flag still listed so install UIs can show it; 192/512 satisfy install checks.
+  return [bundled192, bundled512, faviconIcon]
 }
 
 // Host-specific install manifest (path-absolute id/start_url/scope — Chrome install is picky).
@@ -1110,6 +1109,7 @@ export function createPwaBridgeRouter(params) {
         joinerSite: localSite,
         creatorSite,
         ownerName,
+        isAuthenticatedOwner: true,
       })
 
       const site = createPwaBridgeSiteClient(pagehandler, localSite, argv)

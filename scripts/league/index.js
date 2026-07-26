@@ -46,6 +46,7 @@ import {
   LEADERBOARD_PAGE_TITLE,
   LEADERBOARD_PAGE_STORY,
   applyLeaderboardConsensusToPage,
+  applyCompletedGameIndexToSurveyPage,
 } from '../../src/federation.js'
 import { applyPageAction, applyChessSaveToPage, adoptRemoteWikiPage } from '../../src/chess-core.js'
 import { EnginePool, skillToElo, formatEngineScore, scoreFromWhitePerspective } from './engine-pool.js'
@@ -1844,11 +1845,6 @@ function federationTopTiers(entries) {
   }))
 }
 
-// Survey pages no longer persist gameIndex; games are discovered by crawl.
-function applyCompletedGameIndexToSurveyPage(_surveyPage, _host, _gamePages) {
-  return false
-}
-
 // Mirror federation sync: checkpoint gossip on Chess Leaderboards via page.chess.
 function applyFederationCharmToLeaderboardPage(page, { checkpoint, entries } = {}) {
   void entries
@@ -2534,7 +2530,16 @@ async function writeSite(opts, player, allSites, uidSlugs, index = 0) {
     dateMs: Date.now(),
   }))
   const surveyPage = buildPageJson(SURVEY_PAGE_TITLE, surveyStory)
-  applyCompletedGameIndexToSurveyPage(surveyPage, player.host, gamePages)
+  applyCompletedGameIndexToSurveyPage(
+    surveyPage,
+    player.host,
+    gamePages.map(g => ({
+      slug: g.slug,
+      itemId: g.itemId,
+      title: g.page?.title,
+      pgn: chessItemText(g.page, g.itemId),
+    })),
+  )
 
   if (opts.dryRun) return
 

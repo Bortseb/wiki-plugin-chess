@@ -51,10 +51,11 @@ import {
   Paste,
   isEditableChessItemText,
   looksLikePuzzleBankPaste,
-  formatTrainingLogJournalParagraph,
   isBareModeKeyword,
   resolveSignedInUsername,
   formatPlayerId,
+  guestSeatName,
+  GUEST_PLAYER_NAME,
   normalizeWikiSite,
   remotePageMatchesExpect,
   playerDisplayLabel,
@@ -70,7 +71,7 @@ import {
   createMessageDispatcher,
   pollWindowUntil,
 } from './chess-core.js'
-import { openPasteConfirmModal } from './modals.js'
+import { openPasteConfirmModal, openAlertModal } from './modals.js'
 import {
   normalizeChallengeState,
   isOpenChallenge,
@@ -115,6 +116,10 @@ import {
   fetchSiteContentAsync,
   fetchSitesAsync,
   createBrowserWikiSiteClient,
+  readGameIndex,
+  upsertGameIndexEntry,
+  buildGameIndexEntryFromPgn,
+  applyGameIndexToSurveyPage,
 } from './federation.js'
 import { popupWindowFeaturesString, windowMetricsForChessObj, markChessPwaInstalled } from './board-layout.js'
 
@@ -723,12 +728,21 @@ const enrichChessObj = (chessObj, $item, item) => {
   if (isGhostPage($item) && isCreatePreview(item, $item)) {
     chessObj.wikiGhostPage = true
   }
-  chessObj.signedInDisplayName =
-    chessObj.signedInDisplayName ||
-    chessObj.ownerName ||
-    (typeof ownerName !== 'undefined' && ownerName != null && String(ownerName).trim()
-      ? resolveSignedInUsername(ownerName) || String(ownerName).trim()
-      : undefined)
+  // Only authenticated wiki owners adopt the public ownerName as their seat identity.
+  // Guests must not inherit the site owner's display name (FedWiki exposes it to everyone).
+  {
+    const authenticatedOwner =
+      typeof isAuthenticated !== 'undefined' &&
+      Boolean(isAuthenticated) &&
+      typeof isOwner !== 'undefined' &&
+      Boolean(isOwner)
+    const fromPayload = chessObj.signedInDisplayName || chessObj.ownerName
+    const fromGlobal =
+      authenticatedOwner && typeof ownerName !== 'undefined' && ownerName != null && String(ownerName).trim()
+        ? resolveSignedInUsername(ownerName) || String(ownerName).trim()
+        : undefined
+    chessObj.signedInDisplayName = fromPayload || fromGlobal || undefined
+  }
   delete chessObj.ownerName
 
   if (!chessObj.wikiPageName) {
@@ -1106,11 +1120,11 @@ const enrichViewerContext = (ctx, chessObj) => {
   )
   if (chessObj.viewerCanClaimWikiSeat && wikiOwnerName) {
     chessObj.viewerSeatId = formatPlayerId(wikiOwnerName, location.host)
+    if (!chessObj.signedInDisplayName) chessObj.signedInDisplayName = wikiOwnerName
   } else {
     delete chessObj.viewerSeatId
-  }
-  if (wikiOwnerName && !chessObj.signedInDisplayName) {
-    chessObj.signedInDisplayName = wikiOwnerName
+    // Drop a public site-owner name that would otherwise seat a guest as the owner.
+    if (!authenticated || !owner) delete chessObj.signedInDisplayName
   }
   return chessObj
 }
@@ -1817,7 +1831,12 @@ const applyChessJournalSave = (
   putChessPageActionsInOrder($page, actions, {
     forkSite: batchForkSite,
     ctx,
-    onComplete: forkingCreatePreview ? () => clearCreatePreviewFlags(ctx) : undefined,
+    onComplete: forkingCreatePreview
+      ? () => {
+          clearCreatePreviewFlags(ctx)
+          scheduleSurveyGameIndexFromCtx(ctx, persisted)
+        }
+      : () => scheduleSurveyGameIndexFromCtx(ctx, persisted),
   })
   if (joinFinalize === 'after') {
     if (forkingJoinGhost || isAcceptedGhostJoinGame(item)) {
@@ -1826,6 +1845,38 @@ const applyChessJournalSave = (
     }
   }
   return true
+}
+
+const scheduleSurveyGameIndexFromCtx = (ctx, pgn) => {
+  try {
+    if (!ctx || isSurveyItemText(ctx.item?.text) || isMaintenanceChessState(ctx.chessObj)) return
+    const slug = String(getPageSlug(ctx.$item) || ctx.chessObj?.wikiPageName || '').trim()
+    const itemId = String(ctx.item?.id || ctx.chessObj?.itemId || '').trim()
+    const title = String(ctx.chessObj?.wikiPageTitle || '').trim()
+    publishSurveyGameIndexUpsert({ slug, itemId, title, pgn })
+  } catch (error) {
+    if (wiki.debug) console.log('scheduleSurveyGameIndexFromCtx error', error)
+  }
+}
+
+// Persist a sitemap-seeded gameIndex onto My Chess Games (empty-catalog bootstrap).
+const persistRebuiltSurveyGameIndex = (localSite, rebuiltGameIndex) => {
+  const host = String(localSite || '')
+    .trim()
+    .toLowerCase()
+  if (
+    !host ||
+    host !==
+      String(location.host || '')
+        .trim()
+        .toLowerCase() ||
+    !rebuiltGameIndex
+  ) {
+    return
+  }
+  putChessPageCharmPatch(SURVEY_PAGE_SLUG, { gameIndex: rebuiltGameIndex }, err => {
+    if (err && wiki.debug) console.log('persistRebuiltSurveyGameIndex error', err)
+  })
 }
 
 const saveItemText = (ctx, text, { fen, forkSite, title } = {}) =>
@@ -3443,17 +3494,29 @@ const checkLeaderboardReadiness = (localSite, slug, done) => {
     .catch(() => done({ hasRatedGame: false }))
 }
 
-const resolveJoinerNameForGhost = (hint, localSite) => {
-  const bad = name => !String(name || '').trim() || /^(open|you|guest)$/i.test(String(name).trim())
+const viewerIsAuthenticatedOwner = () =>
+  typeof isAuthenticated !== 'undefined' &&
+  Boolean(isAuthenticated) &&
+  typeof isOwner !== 'undefined' &&
+  Boolean(isOwner)
+
+const resolveJoinerNameForGhost = (hint, localSite, { guestName } = {}) => {
+  const isAuthenticatedOwner = viewerIsAuthenticatedOwner()
+  const placeholder = name => !String(name || '').trim() || /^(open|you)$/i.test(String(name).trim())
   let name = String(hint || '').trim()
-  if (bad(name)) {
+  if (!isAuthenticatedOwner) {
+    if (placeholder(name) || /^guest$/i.test(name)) return guestSeatName(guestName || name)
+    return name
+  }
+  if (placeholder(name) || /^guest$/i.test(name)) {
     name = resolveSignedInUsername(typeof ownerName !== 'undefined' ? ownerName : '') || ''
   }
-  if (bad(name) && localSite) {
+  if ((placeholder(name) || /^guest$/i.test(name)) && localSite) {
     const fromSeat = playerDisplayLabel(formatPlayerId('player', localSite))
-    if (!bad(fromSeat)) name = fromSeat
+    if (fromSeat && !placeholder(fromSeat) && !/^guest$/i.test(fromSeat)) name = fromSeat
   }
-  return bad(name) ? 'You' : name
+  if (placeholder(name) || /^guest$/i.test(name)) return 'You'
+  return name
 }
 
 const buildChallengeJoinGhostStory = (item, challenge, creatorSite) => {
@@ -3488,16 +3551,19 @@ const openGamePageLink = (slug, anchor, host) => {
 }
 
 const resolveJoinerDisplayName = ctx => {
-  const fromOwner =
-    resolveSignedInUsername(ctx?.chessObj?.signedInDisplayName) ||
-    resolveSignedInUsername(typeof ownerName !== 'undefined' ? ownerName : '')
-  if (fromOwner) return fromOwner
-  const seatId = ctx?.chessObj?.viewerSeatId
-  if (seatId) {
-    const fromSeat = playerDisplayLabel(seatId)
-    if (fromSeat && fromSeat.toLowerCase() !== 'open seat') return fromSeat
+  const canClaim = Boolean(ctx?.chessObj?.viewerCanClaimWikiSeat) || viewerIsAuthenticatedOwner()
+  if (canClaim) {
+    const fromOwner =
+      resolveSignedInUsername(ctx?.chessObj?.signedInDisplayName) ||
+      resolveSignedInUsername(typeof ownerName !== 'undefined' ? ownerName : '')
+    if (fromOwner) return fromOwner
+    const seatId = ctx?.chessObj?.viewerSeatId
+    if (seatId) {
+      const fromSeat = playerDisplayLabel(seatId)
+      if (fromSeat && fromSeat.toLowerCase() !== 'open seat') return fromSeat
+    }
   }
-  return 'You'
+  return GUEST_PLAYER_NAME
 }
 
 const showChallengeJoinGhost = ({ host, itemId, anchor, challenge, pgn, joinerDisplayName, entryTitle = '' }) => {
@@ -3511,8 +3577,9 @@ const showChallengeJoinGhost = ({ host, itemId, anchor, challenge, pgn, joinerDi
   const localSite = String(location.host || '')
     .trim()
     .toLowerCase()
+  const isAuthenticatedOwner = viewerIsAuthenticatedOwner()
   const joinerName = resolveJoinerNameForGhost(joinerDisplayName, localSite)
-  const joinerId = formatPlayerId(joinerName, localSite)
+  const joinerId = isAuthenticatedOwner ? formatPlayerId(joinerName, localSite) : guestSeatName(joinerName)
   const seatedPgn = buildChallengeJoinGhostPgn(ghostPgn, challengeState, joinerId)
   const acceptedChallenge = acceptOpenChallenge(challengeState, { joinerId, joinerSite: localSite }) || challengeState
   const item = {
@@ -3693,6 +3760,75 @@ const putChessPageCharmPatch = (slug, patch, done) => {
     .catch(err => done?.(err))
 }
 
+// Upsert one game into My Chess Games page.chess.gameIndex (metadata only).
+const publishSurveyGameIndexUpsert = ({ slug, itemId, title, pgn } = {}, done) => {
+  const localSite = String(location.host || '')
+    .trim()
+    .toLowerCase()
+  const pageSlug = String(slug || '').trim()
+  const id = String(itemId || '').trim()
+  if (!localSite || !pageSlug || !id || typeof pgn !== 'string' || !pgn.trim()) {
+    done?.(null)
+    return
+  }
+  if (pageSlug === SURVEY_PAGE_SLUG || pageSlug === LEADERBOARD_PAGE_SLUG) {
+    done?.(null)
+    return
+  }
+  if (isSurveyItemText(pgn) || isLeaderboardItemText(pgn) || isMaintenanceChessItemText(pgn)) {
+    done?.(null)
+    return
+  }
+  const built = buildGameIndexEntryFromPgn({
+    host: localSite,
+    slug: pageSlug,
+    itemId: id,
+    title,
+    pgn,
+  })
+  if (!built) {
+    done?.(null)
+    return
+  }
+  if (typeof wiki?.site !== 'function') {
+    done?.(new Error('survey get unavailable'))
+    return
+  }
+  wiki.site(localSite).get(`${SURVEY_PAGE_SLUG}.json`, (err, existing) => {
+    try {
+      const { page, isNew } = ensureSurveyPageObject(!err && existing ? existing : null)
+      const next = upsertGameIndexEntry(readGameIndex(page), built.entry, built.bucket)
+      applyGameIndexToSurveyPage(page, next)
+      const persistCharm = putErr => {
+        if (putErr) {
+          done?.(putErr)
+          return
+        }
+        putChessPageCharmPatch(SURVEY_PAGE_SLUG, { gameIndex: readGameIndex(page) }, done)
+      }
+      if (isNew) {
+        if (typeof wiki?.origin?.put !== 'function') {
+          done?.(new Error('survey put unavailable'))
+          return
+        }
+        wiki.origin.put(
+          SURVEY_PAGE_SLUG,
+          {
+            type: 'create',
+            item: { title: page.title || SURVEY_PAGE_TITLE, story: page.story },
+            date: Date.now(),
+          },
+          persistCharm,
+        )
+        return
+      }
+      persistCharm(null)
+    } catch (error) {
+      done?.(error)
+    }
+  })
+}
+
 const probeLeaderboardPageSlug = (localSite, done) => {
   const host = String(localSite || '')
     .trim()
@@ -3758,7 +3894,7 @@ const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, do
       done?.(null)
       return
     }
-    const result = syncOpenChallengeSurveyOnPage(page, { add, removeIds })
+    const result = syncOpenChallengeSurveyOnPage(page, { add, removeIds, host: localSite })
     if (result.error === 'no-survey-item') {
       done?.(new Error('no-survey-item'))
       return
@@ -3766,6 +3902,18 @@ const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, do
     if (!result.changed && !isNew) {
       done?.(null)
       return
+    }
+    const persistCharm = err => {
+      if (err) {
+        done?.(err)
+        return
+      }
+      const index = readGameIndex(page)
+      if (!(index.active.length || index.completed.length || index.challenges.length)) {
+        done?.(null)
+        return
+      }
+      putChessPageCharmPatch(SURVEY_PAGE_SLUG, { gameIndex: index }, done)
     }
     if (isNew) {
       wiki.origin.put(
@@ -3775,16 +3923,17 @@ const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, do
           item: { title: page.title || SURVEY_PAGE_TITLE, story: page.story },
           date: Date.now(),
         },
-        err => done?.(err),
+        persistCharm,
       )
       return
     }
     const action = page.journal?.[page.journal.length - 1]
     if (!action || action.type !== 'edit') {
-      done?.(new Error('missing survey edit action'))
+      // Journal unchanged but charm may have been updated (challenge refs).
+      persistCharm(null)
       return
     }
-    wiki.origin.put(SURVEY_PAGE_SLUG, { ...action, date: Date.now() }, err => done?.(err))
+    wiki.origin.put(SURVEY_PAGE_SLUG, { ...action, date: Date.now() }, persistCharm)
   }
 
   wiki.site(localSite).get(`${SURVEY_PAGE_SLUG}.json`, (err, existing) => {
@@ -3968,6 +4117,9 @@ const buildLeaderboardData = (ctx, data, fetchGen, requestSource = null) => {
         })
         if (isAborted()) return
         reply(result.entries, result.meta)
+        if (result.meta?.rebuiltGameIndex) {
+          persistRebuiltSurveyGameIndex(localSite, result.meta.rebuiltGameIndex)
+        }
         return
       }
       const extraNeighborhoodSites = Array.isArray(data?.extraNeighborhoodSites)
@@ -3991,6 +4143,9 @@ const buildLeaderboardData = (ctx, data, fetchGen, requestSource = null) => {
           blockList: data?.blockList,
           deletionMetrics: data?.deletionMetrics,
           island: data?.island,
+          knownOpponents: data?.knownOpponents,
+          knownFederationSites: data?.knownFederationSites,
+          siteCrawlCache: data?.siteCrawlCache,
           shouldAbort: isAborted,
           onProgress: reportProgress,
         },
@@ -4181,31 +4336,83 @@ const buildSiteSurveyDeferredEnrich = (ctx, data, requestSource = null) => {
 // # Shell App Message Handlers
 
 const fetchLocalPuzzleReferencePages = slugs => {
-  const site = typeof wiki?.site === 'function' ? wiki.site(window.location.host) : null
   const wanted = [...new Set((Array.isArray(slugs) ? slugs : []).map(s => String(s || '').trim().toLowerCase()))]
     .filter(slug => /^[a-z0-9][a-z0-9-]*$/.test(slug))
     .slice(0, 20)
-  if (!site?.get || !wanted.length) return Promise.resolve([])
-  return Promise.all(
-    wanted.map(
-      slug =>
-        new Promise(resolve => {
-          site.get(`${slug}.json`, (err, page) => {
-            if (err || !page) {
-              resolve(null)
-              return
-            }
-            resolve({
-              slug,
-              title: String(page.title || slug),
-              story: (Array.isArray(page.story) ? page.story : [])
-                .filter(item => item?.type === 'chess')
-                .map(item => ({ type: 'chess', id: item.id, text: String(item.text || '') })),
-            })
+  if (!wanted.length) return Promise.resolve([])
+  const site = typeof wiki?.site === 'function' ? wiki.site(window.location.host) : null
+  const readOne = slug =>
+    new Promise(resolve => {
+      // Prefer yellow Local Changes (exportable page JSON) over origin.
+      const tryLocal = done => {
+        if (typeof wiki?.local?.get !== 'function') {
+          done(null)
+          return
+        }
+        wiki.local.get(`${slug}.json`, (err, page) => {
+          done(err || !page ? null : page)
+        })
+      }
+      const tryOrigin = pageFromLocal => {
+        if (pageFromLocal) {
+          resolve({
+            slug,
+            title: String(pageFromLocal.title || slug),
+            story: (Array.isArray(pageFromLocal.story) ? pageFromLocal.story : [])
+              .filter(item => item?.type === 'chess')
+              .map(item => ({ type: 'chess', id: item.id, text: String(item.text || '') })),
           })
-        }),
-    ),
-  ).then(pages => pages.filter(Boolean))
+          return
+        }
+        if (!site?.get) {
+          resolve(null)
+          return
+        }
+        site.get(`${slug}.json`, (err, page) => {
+          if (err || !page) {
+            resolve(null)
+            return
+          }
+          resolve({
+            slug,
+            title: String(page.title || slug),
+            story: (Array.isArray(page.story) ? page.story : [])
+              .filter(item => item?.type === 'chess')
+              .map(item => ({ type: 'chess', id: item.id, text: String(item.text || '') })),
+          })
+        })
+      }
+      tryLocal(tryOrigin)
+    })
+  return Promise.all(wanted.map(readOne)).then(pages => pages.filter(Boolean))
+}
+
+// Scan browser localStorage for FedWiki page JSON (Local Changes export surface).
+const listLocalWikiPagesForAcademyProgress = () => {
+  const pages = []
+  if (typeof localStorage === 'undefined') return pages
+  const maxKeys = 400
+  for (let i = 0; i < localStorage.length && pages.length < maxKeys; i++) {
+    const key = localStorage.key(i)
+    if (!key || !/^[a-z0-9][a-z0-9-]*$/.test(key)) continue
+    if (key.startsWith('wiki-chess-') || key.startsWith('wiki.')) continue
+    let page
+    try {
+      page = JSON.parse(localStorage.getItem(key) || '')
+    } catch {
+      continue
+    }
+    if (!page || typeof page !== 'object' || !Array.isArray(page.story)) continue
+    if (!page.story.some(item => item?.type === 'chess')) continue
+    pages.push({
+      slug: key,
+      title: String(page.title || key),
+      story: page.story
+        .filter(item => item?.type === 'chess')
+        .map(item => ({ type: 'chess', id: item.id, text: String(item.text || '') })),
+    })
+  }
+  return pages
 }
 
 /* eslint-disable no-unused-vars -- uniform (ctx, event, text, fen) MSG dispatch signature */
@@ -4257,22 +4464,6 @@ const shellAppMessageHandlers = {
       }
     }
   },
-  [MSG.REQUEST_OPEN_POSITION_EDITOR](ctx, event, text, fen) {
-    const iframeWindow = ctx.iframe?.[0]?.contentWindow
-    const source = event.source
-    const fenPayload = event.data?.fen
-    const targets = new Set()
-    if (source && (source === iframeWindow || source === ctx.popup)) targets.add(source)
-    if (ctx.popup && !ctx.popup.closed) targets.add(ctx.popup)
-    else if (iframeWindow) targets.add(iframeWindow)
-    for (const target of targets) {
-      try {
-        target.postMessage({ action: MSG.REQUEST_OPEN_POSITION_EDITOR, fen: fenPayload }, window.origin)
-      } catch {
-        /* ignore closed targets */
-      }
-    }
-  },
   [MSG.REQUEST_SIGN_IN](ctx, event, text, fen) {
     const claim = document.getElementById('claim')
     const signIn = document.getElementById('show-security-dialog')
@@ -4301,6 +4492,17 @@ const shellAppMessageHandlers = {
         window.origin,
       )
     })
+  },
+  [MSG.FETCH_LOCAL_ACADEMY_PROGRESS](ctx, event, text, fen) {
+    const pages = listLocalWikiPagesForAcademyProgress()
+    event.source?.postMessage(
+      {
+        action: MSG.LOCAL_ACADEMY_PROGRESS_DATA,
+        requestId: event.data?.requestId,
+        pages,
+      },
+      window.origin,
+    )
   },
   [MSG.POPUP_READY](ctx, event, text, fen) {
     ctx.popup = event.source
@@ -4337,6 +4539,7 @@ const shellAppMessageHandlers = {
     const challenge = normalizeChallengeState(event.data.challenge)
     const ghost = event.data.ghost
     const ghostItemId = String(event.data.ghostItemId || ghost?.itemId || '').trim()
+    const pageBackedSlug = String(ghost?.slug || '').trim()
     if (ownerCanJournalHereFlag(ctx)) {
       if (ghost && challenge) {
         publishOpenChallengeSurveyDelta({
@@ -4344,6 +4547,7 @@ const shellAppMessageHandlers = {
             itemId: ghost.itemId,
             pgn: ghost.pgn,
             title: ghost.title,
+            ...(pageBackedSlug ? { slug: pageBackedSlug } : {}),
             challenge,
           },
         })
@@ -4354,8 +4558,9 @@ const shellAppMessageHandlers = {
     }
     if (event.data.challenge !== undefined) {
       if (shouldBlockShellJournalSave(ctx, event)) return
-      // Open seeks live on My Chess Games metadata — do not journal challenge onto the ghost item.
-      if (ghost) {
+      // Pending survey-only seeks: do not journal challenge onto the posting item.
+      // Page-backed seeks keep challenge on the game item for fork / Accept.
+      if (ghost && !pageBackedSlug) {
         delete ctx.chessObj.challenge
       } else {
         ctx.chessObj.challenge = challenge || undefined
@@ -4583,33 +4788,6 @@ const shellAppMessageHandlers = {
     }
     updateChessItemControls(ctx)
   },
-  [MSG.CERTIFY_TRAINING_LOG](ctx, event) {
-    // Opt-in living report card: only write a paragraph on an owned/forked page.
-    const $item = ctx.$item
-    const item = ctx.item
-    if (!$item?.length || !item || isGhostPage($item)) return
-    const $page = $item.parents('.page:first')
-    if (!$page.length) return
-    if (!ctx.chessObj?.pageOnThisWiki && !ctx.chessObj?.ownerCanJournalHere) return
-    if (typeof isOwner !== 'undefined' && !isOwner && !ctx.chessObj?.ownerCanJournalHere) return
-    const entry = event?.data?.entry
-    const paragraphText = formatTrainingLogJournalParagraph(entry)
-    if (!paragraphText) return
-    const id =
-      typeof wiki?.getId === 'function'
-        ? wiki.getId()
-        : Array.from(crypto.getRandomValues(new Uint8Array(8)))
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('')
-    const paragraph = { type: 'paragraph', id, text: paragraphText }
-    const story = Array.isArray($page.data('data')?.story) ? $page.data('data').story : null
-    if (story) {
-      const idx = story.findIndex(s => s?.id === item.id)
-      if (idx >= 0) story.splice(idx + 1, 0, paragraph)
-      else story.push(paragraph)
-    }
-    wiki.pageHandler.put($page, { type: 'add', id, item: paragraph, after: item.id })
-  },
   [MSG.MODE_CHANGED](ctx, event, text, fen) {
     // The app switched modes in-app without persisting (e.g. game -> position
     // editor). Update our notion of the item state so the footer controls (the
@@ -4711,8 +4889,8 @@ const shellAppMessageHandlers = {
     })()
   },
   [MSG.ABANDON_FETCHES](ctx, event, text, fen) {
-    // Viewer left the leaderboard or reloaded — drop in-flight federation crawls so
-    // stacked refreshes cannot freeze the wiki tab (especially on multi-site seeds).
+    // Explicit cancel (edit mode, new conflicting crawl, tab teardown) — not leaving
+    // the leaderboard view; Visible-federation crawls keep running after navigation.
     ctx.leaderboardFetchGen = (ctx.leaderboardFetchGen || 0) + 1
     bindDeepAuditUnload(false)
   },
@@ -4745,7 +4923,9 @@ const shellAppMessageHandlers = {
   [MSG.FETCH_UI](ctx, event, text, fen) {
     const loading = event.data?.loading === true
     const deep = event.data?.deep === true
-    bindDeepAuditUnload(loading && deep)
+    const warnUnload = event.data?.warnUnload === true
+    // Deep audits and Visible-federation crawls both warn before tab close.
+    bindDeepAuditUnload(loading && (deep || warnUnload))
     // After the iframe reports its loading height, reclamp so the footer edit bar
     // is never covered by the iframe hit target.
     maybeClearEmbedLoading(ctx)
@@ -4755,6 +4935,19 @@ const shellAppMessageHandlers = {
       if (!Number.isFinite(h)) return
       applyIframeHeight(ctx, capIframeHeightBelowFooter(ctx, h))
     })
+  },
+  [MSG.ALERT_UI](ctx, event, text, fen) {
+    // Full-viewport alert on the parent wiki window — visible even when the chess
+    // iframe is scrolled away or showing another plugin mode.
+    const title = String(event.data?.title || 'Chess').trim() || 'Chess'
+    const message = String(event.data?.message || '').trim()
+    const okLabel = String(event.data?.okLabel || 'OK').trim() || 'OK'
+    try {
+      window.focus?.()
+    } catch {
+      /* ignore */
+    }
+    openAlertModal({ title, message, okLabel, mount: document.body })
   },
   [MSG.OPEN_SURVEY_PAGE](ctx, event, text, fen) {
     // Present the "My Chess Games" page as a forkable GHOST in the lineup, right after
@@ -4888,6 +5081,57 @@ const shellAppMessageHandlers = {
     }
     if (!gameSlug) return
     openGamePageLink(gameSlug, anchor, host || null)
+  },
+  [MSG.SHOW_CRAWL_HITS_PAGE](ctx, event, text, fen) {
+    // Same shape as FedWiki search results: intro paragraph + reference items.
+    if (typeof wiki?.newPage !== 'function' || typeof wiki?.showResult !== 'function') return
+    const title = String(event.data?.title || 'Crawl hits').trim() || 'Crawl hits'
+    const intro = String(event.data?.intro || '').trim()
+    const refs = Array.isArray(event.data?.references) ? event.data.references : []
+    const maxRefs = Math.max(1, Math.min(250, Number(event.data?.maxReferences) || 200))
+    const shown = refs.slice(0, maxRefs)
+    const omitted = Math.max(0, refs.length - shown.length)
+    const story = []
+    if (intro || omitted) {
+      const lines = [intro, omitted ? `${omitted} additional hit${omitted === 1 ? '' : 's'} omitted.` : '']
+        .filter(Boolean)
+        .join('\n')
+      if (lines) story.push({ type: 'paragraph', id: newItemId(), text: lines })
+    }
+    for (const row of shown) {
+      const site = String(row?.site ?? row?.host ?? '')
+        .trim()
+        .toLowerCase()
+      const slug = String(row?.slug || '').trim()
+      if (!site || !slug) continue
+      story.push({
+        type: 'reference',
+        id: newItemId(),
+        site,
+        slug,
+        title: String(row?.title || slug).trim() || slug,
+        text: String(row?.text || '').trim(),
+      })
+    }
+    if (!story.length) {
+      story.push({
+        type: 'paragraph',
+        id: newItemId(),
+        text: 'No crawl hits to list yet.',
+      })
+    }
+    const $page = ctx.$item?.parents?.('.page')?.first?.()
+    const anchor = wikiLineupAnchor($page, ctx.$item)
+    const ghost = wiki.newPage({
+      title,
+      story,
+      journal: [{ type: 'create', item: { title, story }, date: Date.now() }],
+    })
+    try {
+      wiki.showResult(ghost, anchor ? { $page: anchor } : {})
+    } catch (error) {
+      if (wiki.debug) console.log('show crawl hits page error', error)
+    }
   },
   [MSG.CREATE_PREVIEW]: handleCreatePreview,
   [MSG.UPDATE_GHOST_PAGE_TITLE](ctx, event, text, fen) {

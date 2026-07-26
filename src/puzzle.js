@@ -30,6 +30,10 @@ import {
   puzzleBankBodyText,
   recordAdaptivePuzzleOutcome,
   academyLinksForPuzzleThemes,
+  markPuzzleItemProgress,
+  puzzleItemProgressFromText,
+  academyProgressFromLocalPages,
+  resolveSmartAcademyNext,
   START_FEN,
   escapeHtml,
   isPuzzleState,
@@ -48,12 +52,8 @@ import {
   isPuzzleSpecLine,
   puzzleMatchesFilters,
   puzzleFiltersToSearchParams,
-  puzzleTagList,
   normalizePuzzlePlayModel,
   puzzlePlayerColorFromPuzzle,
-  recordTrainingCompletion,
-  hasTrainingCompletion,
-  formatTrainingLogJournalParagraph,
 } from './chess-core.js'
 export { parsePuzzleRow, parsePuzzleBankContent, parsePuzzleJsonLine }
 import {
@@ -682,6 +682,17 @@ export function createPuzzleSolver(puzzle) {
       }
       return { status: status === 'solved' ? 'solved' : 'continue', opponentMove, message: praise }
     },
+    // Illegal drop (piece onto a square it cannot reach) — one-chance hard fail.
+    failIllegal() {
+      if (status === 'solved' || status === 'failed') return { status: 'ignored', reason: 'already-done' }
+      if (status !== 'solving') return { status: 'ignored', reason: 'not-solving' }
+      status = 'failed'
+      return {
+        status: 'wrong',
+        reason: 'illegal',
+        message: 'That square is not a legal move for that piece.',
+      }
+    },
   }
 }
 
@@ -1068,6 +1079,8 @@ function wirePuzzleAuthorControls() {
 // # Puzzle Mode UI
 
 let puzzleSolver = null
+// Teach soft-coach leaves Retry disabled (failed stays false). Track coach so Retry can reset.
+let puzzleCoachActive = false
 // Total solver moves at the start of the current puzzle — lets the turn prompt tell
 // the opening move ("Your turn") from a mid-solve step ("✓ Correct! Your move").
 let puzzleTotalPlayerMoves = 0
@@ -1080,8 +1093,6 @@ let mixedPuzzlePool = false
 let preferNetworkPuzzle = false
 let puzzlePageRequestSeq = 0
 const pendingPuzzlePageRequests = new Map()
-// True after the learner submits any judged move on the current puzzle (for Retry UX).
-let puzzleAttempted = false
 
 // Player-chosen puzzle pool filters (rating + popularity), gathered by the filter
 // modal before a (new) puzzle is drawn. null/{} means "any". Only bounds the player
@@ -1129,6 +1140,11 @@ function pickFromEmbeddedBank(excludeId = null) {
   const choices = unseen.length ? unseen : fresh
   const pickFrom = choices.length ? choices : pool.filter(p => p.id !== excludeId)
   const finalPool = pickFrom.length ? pickFrom : pool
+  // Adaptive coach climbs gradually: always offer the easiest remaining draw.
+  if (isAdaptiveCoachMode()) {
+    const ranked = [...finalPool].sort((a, b) => (Number(a.rating) || 0) - (Number(b.rating) || 0))
+    return ranked[0] || pool[0] || null
+  }
   return finalPool[Math.floor(Math.random() * finalPool.length)] || pool[0] || null
 }
 
@@ -1187,16 +1203,19 @@ export function shouldKeepActivePuzzleSession(next, prev = ctx.chessState) {
   const nextKey = String(next?.chessState || '').trim()
   const prevKey = String(prev?.chessState || '').trim()
   if (nextKey !== prevKey) {
-    // Adaptive coach rewrites solved=/failed=/rating= on the same bank body — keep the board.
-    const nextAdaptive = parsePuzzleSpec(parseChessItem(nextKey).content || '').adaptive
-    const prevAdaptive = parsePuzzleSpec(parseChessItem(prevKey).content || '').adaptive
-    if (!(nextAdaptive && prevAdaptive && puzzleBankBodyText(nextKey) === puzzleBankBodyText(prevKey))) {
-      return false
-    }
+    // Adaptive coach / lesson progress rewrites first-line tokens on the same body — keep the board.
+    const nextBody = puzzleBankBodyText(nextKey)
+    const prevBody = puzzleBankBodyText(prevKey)
+    if (nextBody && nextBody === prevBody) return true
+    return false
   }
+  // Prior boot failed — allow a fresh startPuzzle() when the shell re-pushes SET_STATE
+  // (common after navigating away and returning to an Academy lesson item).
   if (puzzleLoadErrorVisible()) return false
   if (puzzleBootPromise) return true
   if (!puzzlePageVisible()) return false
+  // Console was torn down (mode switch / reset) while the puzzle page stayed mounted.
+  if (!ctx.chessConsole && !puzzleConsoleReady) return false
   if (puzzleSolver?.puzzle) return true
   if (ctx.chessConsole?.components?.board?.chessboard?.view) return true
   const statusEl = document.getElementById('puzzle-status')
@@ -1318,13 +1337,20 @@ function puzzlePassesFilters(puzzle, filters = activePuzzleFilters()) {
 }
 
 async function puzzleFilterCountLabel(values) {
-  const est = await fetchLocalPuzzleDownloadEstimate(normalizePuzzleFilters(values))
-  const n = Number(est.filteredCount ?? est.totalCount ?? 0)
-  if (!n) return 'No puzzles match these filters.'
-  if (est.hasFilters && est.matchRatio != null && est.matchRatio < 1) {
-    return `About ${n.toLocaleString()} puzzles match`
+  try {
+    const est = await fetchLocalPuzzleDownloadEstimate(normalizePuzzleFilters(values))
+    const n = Number(est.filteredCount ?? est.totalCount ?? 0)
+    if (!n) {
+      // Farm DB not indexed yet (or disabled) — Play still draws from Lichess/API when online.
+      return 'Farm puzzle count unavailable — Play may still load puzzles from the network.'
+    }
+    if (est.hasFilters && est.matchRatio != null && est.matchRatio < 1) {
+      return `About ${n.toLocaleString()} puzzles match`
+    }
+    return `${n.toLocaleString()} puzzles match`
+  } catch {
+    return 'Puzzle count unavailable — Play may still load puzzles from the network.'
   }
-  return `${n.toLocaleString()} puzzles match`
 }
 
 // Open the filter modal, then run `onChosen` once the player commits a selection.
@@ -1619,7 +1645,6 @@ function filtersNeedFarmPopularity(filters = {}) {
 // Separate from the wiki farm's shared server-side database. Browsers cannot fetch
 // database.lichess.org (CORS), so downloads are same-origin from /plugin/chess/puzzle-database.
 
-const LOCAL_PUZZLE_OPT_IN_KEY = 'wiki-chess-local-puzzle-download'
 const LOCAL_PUZZLE_CACHE_NAME = 'wiki-chess-local-puzzles-v1'
 const LOCAL_PUZZLE_INDEXED_DB_NAME = 'wiki-chess-local-puzzles'
 const LOCAL_PUZZLE_INDEXED_DB_STORE = 'index'
@@ -1640,20 +1665,11 @@ function localPuzzleDownloadEstimateUrl(filters = {}) {
 }
 
 export function isLocalPuzzleDownloadOptIn() {
-  try {
-    return localStorage.getItem(LOCAL_PUZZLE_OPT_IN_KEY) === '1'
-  } catch {
-    return false
-  }
+  return Boolean(ctx?.localPuzzleDownloadEnabled?.())
 }
 
 export function setLocalPuzzleDownloadOptIn(enabled) {
-  try {
-    if (enabled) localStorage.setItem(LOCAL_PUZZLE_OPT_IN_KEY, '1')
-    else localStorage.removeItem(LOCAL_PUZZLE_OPT_IN_KEY)
-  } catch {
-    /* localStorage may be unavailable */
-  }
+  ctx?.setLocalPuzzleDownloadEnabled?.(Boolean(enabled))
 }
 
 // In-memory mirror of IDB `status` — sync reads for UI; writes flush to IndexedDB.
@@ -2254,6 +2270,7 @@ async function ensurePuzzleConsole() {
     new Sound(ctx.chessConsole, { soundSpriteFile: './assets/sounds/chess_console_sounds.mp3' })
     ctx.patchSoundForSync(ctx.chessConsole)
     ctx.chessConsole.messageBroker.subscribe('game/move/legal', onPuzzleLegalMove)
+    ctx.chessConsole.messageBroker.subscribe('game/move/illegal', onPuzzleIllegalMove)
     wirePuzzleTurnPrompt(ctx.chessConsole)
     refitBoardForContext(ctx, { optional: true })
     return ctx.chessConsole
@@ -2269,11 +2286,12 @@ function onPuzzleLegalMove(data) {
   const isCheckmate = ctx.chessConsole.state.chess.inCheckmate()
   const result = puzzleSolver.submitMove(uci, { isCheckmate })
   if (result.status !== 'ignored') {
-    puzzleAttempted = true
     updatePuzzleControlVisibility()
   }
   if (result.status === 'coach') {
+    puzzleCoachActive = true
     updatePuzzleStatus('coach', result.message)
+    updatePuzzleControlVisibility()
     try {
       ctx.chessConsole.state.chess.undo()
       // handleMoveResponse already bumped plyViewed with the rejected ply — sync so
@@ -2283,10 +2301,15 @@ function onPuzzleLegalMove(data) {
       const fen = ctx.chessConsole.state.chess.fenOfPly(ctx.chessConsole.state.plyViewed)
       if (board?.chessboard && fen) void board.chessboard.setPosition(fen, false)
       board?.markLastMove?.()
+      // Ask LocalPlayer for another move — coach undoes the ply without advancing the turn loop.
+      ctx.chessConsole.nextMove?.()
     } catch {
       // Board may already match; coaching text still explains the try.
     }
     return
+  }
+  if (result.status === 'continue' || result.status === 'solved') {
+    puzzleCoachActive = false
   }
   if (result.status === 'continue') {
     ctx.chessConsole.opponent.enqueue(result.opponentMove)
@@ -2296,7 +2319,10 @@ function onPuzzleLegalMove(data) {
     if (isAdaptiveCoachMode()) {
       lockPuzzleBoardInput()
       persistAdaptivePuzzleOutcome('solved')
+    } else {
+      markLessonProgressOnSolve()
     }
+    void renderPuzzleNextGuide(document.getElementById('puzzle-status'))
   } else if (result.status === 'wrong') {
     updatePuzzleStatus('wrong', result.message)
     if (isAdaptiveCoachMode()) {
@@ -2304,6 +2330,24 @@ function onPuzzleLegalMove(data) {
       persistAdaptivePuzzleOutcome('failed')
     }
   }
+}
+
+// Adaptive coach: dropping onto an illegal square is a logged failure (browser-local only).
+function onPuzzleIllegalMove(data) {
+  if (!isAdaptiveCoachMode() || !puzzleSolver || !ctx.chessConsole) return
+  if (puzzleSolver.solved || puzzleSolver.failed) return
+  if (data?.playerMoved && data.playerMoved !== ctx.chessConsole.player) return
+  const move = data?.move || {}
+  const from = String(move.from || '').trim()
+  const to = String(move.to || '').trim()
+  // Require a real drop (from→to). Selecting a piece with no moves only has `from`.
+  if (!from || !to || from === to) return
+  const result = puzzleSolver.failIllegal?.()
+  if (!result || result.status === 'ignored') return
+  updatePuzzleControlVisibility()
+  lockPuzzleBoardInput()
+  updatePuzzleStatus('wrong', result.message)
+  persistAdaptivePuzzleOutcome('failed', { reason: 'illegal' })
 }
 
 // Read an item-embedded puzzle bank ("PUZZLE\n<CSV|JSONL…>") out of the resolved
@@ -2411,14 +2455,14 @@ function specHasSavedSettings(spec) {
 
 // Write the active filter selection back into the item text ("PUZZLE rating=…",
 // or "PUZZLE RANDOM" when nothing is narrowed) so the choice persists across reloads
-// and can be copy-pasted to other items. Mirrors saveCurrentPuzzleToItem's shape;
-// putJournal is a no-op for viewers, who simply keep the filters for the session.
-// Adaptive coach / multiline banks rewrite only the first-line tokens; JSONL rows stay.
+// and can be copy-pasted to other items. Adaptive coach progress (`solved=` / `failed=` /
+// rating window) and lesson `done=` also land here — on the academy that becomes
+// yellow Local Changes page JSON (exportable / re-importable), not a side store.
 function persistPuzzleFiltersToItem() {
   const filters = { ...activePuzzleFilters() }
   if (isAdaptiveCoachMode()) filters.adaptive = true
   const prev = ctx.chessState?.chessState || ''
-  // Never overwrite a teach-PGN lesson with a bare filter line.
+  // Never overwrite a teach-PGN lesson with a bare filter line — use markLessonProgress.
   if (/\[FEN\s+"/i.test(prev) || (/\[Event\s+"/i.test(prev) && /^\s*1\./m.test(prev))) return
   const text =
     embeddedPuzzleBank?.length || puzzleBankBodyText(prev)
@@ -2442,13 +2486,107 @@ function lockPuzzleBoardInput() {
   ctx.chessConsole?.components?.board?.chessboard?.disableMoveInput?.()
 }
 
-function persistAdaptivePuzzleOutcome(outcome) {
+function persistAdaptivePuzzleOutcome(outcome, { reason } = {}) {
+  void reason
   if (!isAdaptiveCoachMode()) return
   const id = String(puzzleSolver?.puzzle?.id || '').trim()
   if (!id) return
   puzzleFilters = recordAdaptivePuzzleOutcome(activePuzzleFilters(), outcome, id)
   persistPuzzleFiltersToItem()
   updatePuzzleFiltersDisplay()
+}
+
+function authoredNextSlug() {
+  const fromFilters = String(activePuzzleFilters()?.next || '').trim().toLowerCase()
+  if (fromFilters) return fromFilters
+  return String(puzzleItemProgressFromText(ctx.chessState?.chessState || '').next || '')
+    .trim()
+    .toLowerCase()
+}
+
+function markLessonProgressOnSolve() {
+  const prev = String(ctx.chessState?.chessState || '')
+  if (!prev.trim()) return
+  const next = authoredNextSlug()
+  const text = markPuzzleItemProgress(prev, { done: true, ...(next ? { next } : {}) })
+  if (text.trim() === prev.trim()) return
+  const prog = puzzleItemProgressFromText(text)
+  if (prog.next && puzzleFilters) puzzleFilters.next = prog.next
+  if (puzzleFilters) puzzleFilters.done = true
+  ctx.chessState = {
+    ...(ctx.chessState || {}),
+    format: 'PUZZLE',
+    mode: 'PUZZLE',
+    gameType: 'puzzle',
+    chessState: text,
+    FEN: undefined,
+    PGN: undefined,
+    bareKeywordGuard: undefined,
+  }
+  ctx.putJournal(text)
+}
+
+let pendingAcademyProgressRequests = new Map()
+let academyProgressRequestSeq = 0
+let cachedAcademyProgressBySlug = null
+
+export function receiveLocalAcademyProgressData(data = {}) {
+  const requestId = String(data.requestId || '')
+  const pending = pendingAcademyProgressRequests.get(requestId)
+  if (!pending) return false
+  pendingAcademyProgressRequests.delete(requestId)
+  window.clearTimeout(pending.timer)
+  const pages = Array.isArray(data.pages) ? data.pages : []
+  cachedAcademyProgressBySlug = academyProgressFromLocalPages(pages)
+  pending.resolve(cachedAcademyProgressBySlug)
+  return true
+}
+
+function requestLocalAcademyProgress() {
+  const wiki = shellMessengerFromContext(ctx)
+  if (!wiki?.fetchLocalAcademyProgress) return Promise.resolve(cachedAcademyProgressBySlug || {})
+  const requestId = `academy-progress-${Date.now().toString(36)}-${++academyProgressRequestSeq}`
+  return new Promise(resolve => {
+    const timer = window.setTimeout(() => {
+      pendingAcademyProgressRequests.delete(requestId)
+      resolve(cachedAcademyProgressBySlug || {})
+    }, 2500)
+    pendingAcademyProgressRequests.set(requestId, { resolve, timer })
+    wiki.fetchLocalAcademyProgress({ requestId })
+  })
+}
+
+async function resolveNextSuggestionSlug() {
+  const start = authoredNextSlug()
+  if (!start) return null
+  const progress = await requestLocalAcademyProgress()
+  return resolveSmartAcademyNext(start, progress || {}) || start
+}
+
+async function renderPuzzleNextGuide(container) {
+  if (!container) return
+  const existing = container.querySelector('.wiki-puzzle-next-guide')
+  if (existing) existing.remove()
+  const slug = await resolveNextSuggestionSlug()
+  if (!slug) return
+  const title =
+    cachedAcademyProgressBySlug?.[slug]?.title ||
+    slug
+      .split('-')
+      .filter(Boolean)
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ')
+  const guide = document.createElement('div')
+  guide.className = 'wiki-puzzle-next-guide'
+  guide.appendChild(document.createTextNode('Next: '))
+  const a = document.createElement('a')
+  a.href = '#'
+  a.className = 'wiki-puzzle-concept-link'
+  a.dataset.wikiTitle = title
+  a.textContent = `[[${title}]]`
+  a.setAttribute('title', `Open ${title} in the wiki lineup`)
+  guide.appendChild(a)
+  container.appendChild(guide)
 }
 
 function puzzleRowWithPrompt(row, prompt) {
@@ -2517,12 +2655,6 @@ function resumeSolverForPuzzle(puzzle, resume = {}) {
     typeof resume.puzzleTotalPlayerMoves === 'number'
       ? resume.puzzleTotalPlayerMoves
       : puzzleSolver.remainingPlayerMoves
-  puzzleAttempted = Boolean(
-    progress &&
-      progress.status &&
-      progress.status !== 'idle' &&
-      (progress.index > 0 || progress.status === 'failed' || progress.status === 'solved'),
-  )
 
   const historySans = Array.isArray(resume.historySans) ? resume.historySans : []
   ctx.chessConsole.components?.board?.chessboard?.disableMoveInput?.()
@@ -2658,6 +2790,11 @@ async function startPuzzleInner() {
     puzzleFilters = { ...spec.filters }
     if (spec.adaptive) puzzleFilters.adaptive = true
   }
+  // Adaptive: lead with the easiest puzzle still inside the rating window.
+  if (isAdaptiveCoachMode() && Array.isArray(embeddedPuzzleBank) && embeddedPuzzleBank.length) {
+    const lead = pickFromEmbeddedBank(null)
+    if (lead) embeddedPuzzle = lead
+  }
   mixedPuzzlePool =
     Boolean(embeddedPuzzleBank?.length || spec.filters?.pageSlugs?.length) && puzzleSpecEnablesNetworkPool(spec)
   preferNetworkPuzzle = false
@@ -2682,7 +2819,7 @@ async function startPuzzleInner() {
   // "PUZZLE RANDOM" for an unfiltered pick) so the setting persists and can be
   // copy-pasted to other items. An item that already carries a spec — the RANDOM
   // marker and/or any filter tokens — skips the chooser and draws immediately,
-  // adopting those filters for the session ("Edit Filters" reopens the chooser).
+  // adopting those filters for the session ("Edit Puzzle Filters" reopens the chooser).
   // Inline JSONL and pages= references form a curated pool; when the same first line
   // also enables a network pool, New Puzzle alternates curated and sourced draws.
   // Academy teach-PGN items (`[FEN …]` / `[Event …]`) must never open the chooser —
@@ -2725,9 +2862,9 @@ function startSolverForPuzzle(puzzle) {
     return
   }
   showPuzzleLoadedUi()
+  puzzleCoachActive = false
   puzzleSolver = createPuzzleSolver(puzzle).start()
   puzzleTotalPlayerMoves = puzzleSolver.remainingPlayerMoves
-  puzzleAttempted = false
   renderPuzzleMeta(puzzle, puzzleSolver)
   resetPuzzleReveal()
   // initGame alone does not clear cm-chessboard move input. If input is still
@@ -2972,7 +3109,7 @@ function updatePuzzleStatus(state, message = '') {
       text: note
         ? `✓ ${note}`
         : adaptive
-          ? '✓ Solved! Logged — New Puzzle for the next challenge.'
+          ? '✓ Solved! Progress saved on this page — New Puzzle for the next challenge.'
           : '✓ Solved! Well done.',
       cls: 'wiki-puzzle-status-ok',
     }),
@@ -2980,7 +3117,7 @@ function updatePuzzleStatus(state, message = '') {
       text:
         note ||
         (adaptive
-          ? '✗ Not this time — attempt logged. Use New Puzzle for the next one.'
+          ? '✗ Not this time — attempt saved on this page. Use New Puzzle for the next one.'
           : '✗ This is not correct, Try again!'),
       cls: 'wiki-puzzle-status-bad',
     }),
@@ -2999,59 +3136,12 @@ function updatePuzzleStatus(state, message = '') {
   ) {
     renderPuzzleThemeGuideLinks(el)
   }
+  if (state === 'solved') {
+    void renderPuzzleNextGuide(el)
+  }
   const nextBtn = document.getElementById('puzzleNextBtn')
   if (nextBtn) nextBtn.classList.toggle('btn-primary', state === 'solved' || state === 'wrong')
-  updateTrainingLogButton(state === 'solved')
   ctx.notifyWikiHeight()
-}
-
-function trainingLogContext() {
-  const puzzle = puzzleSolver?.puzzle
-  const pageSlug = String(ctx.chessState?.wikiPageName || ctx.chessState?.pageSlug || ctx.chessState?.slug || '').trim()
-  const itemId = String(ctx.chessState?.itemId || '').trim()
-  return {
-    pageSlug,
-    itemId,
-    puzzleId: String(puzzle?.id || '').trim(),
-    tags: puzzleTagList(puzzle),
-    themes: Array.isArray(puzzle?.themes) ? puzzle.themes : [],
-    title: String(ctx.chessState?.wikiPageTitle || ctx.chessState?.pageTitle || '').trim(),
-  }
-}
-
-function updateTrainingLogButton(showSolved) {
-  const btn = document.getElementById('puzzleTrainingLogBtn')
-  if (!btn) return
-  const entry = trainingLogContext()
-  const already = entry.pageSlug && entry.itemId && hasTrainingCompletion(entry)
-  const show = Boolean(showSolved && entry.pageSlug && entry.itemId && !already)
-  setPuzzleControlShown(btn, show)
-  if (show) {
-    btn.textContent = canPersistPuzzle() ? 'Certify Completion' : 'Add to My Training Log'
-    btn.disabled = false
-  }
-}
-
-function certifyTrainingLogFromUi() {
-  const entry = {
-    ...trainingLogContext(),
-    certifiedAt: Date.now(),
-  }
-  if (!entry.pageSlug || !entry.itemId) return
-  recordTrainingCompletion(entry)
-  if (canPersistPuzzle()) {
-    shellMessenger()?.certifyTrainingLog?.({ entry })
-  }
-  updateTrainingLogButton(false)
-  const el = document.getElementById('puzzle-status')
-  if (el) {
-    el.textContent = canPersistPuzzle()
-      ? '✓ Certified on your training log and this page.'
-      : '✓ Saved to My Training Log on this device.'
-    el.classList.add('wiki-puzzle-status-ok')
-  }
-  // Silence unused helper — journal text is rendered by the shell handler.
-  void formatTrainingLogJournalParagraph
 }
 
 // Replay the solution UCI line from the solver's start position and collect SAN
@@ -3143,12 +3233,18 @@ function updatePuzzleControlVisibility() {
   )
   const saveBtn = page.querySelector('#puzzleSaveBtn')
   // Adaptive coach: one attempt per draw — no silent retries that skip logging.
-  // Fixed lesson items: hide Retry until the learner has actually tried a move —
-  // showing it on a fresh board reads as "already failed / stuck".
-  const showRetry =
-    !isAdaptiveCoachMode() &&
-    (canRotate || puzzleAttempted || Boolean(puzzleSolver?.failed) || Boolean(puzzleSolver?.solved))
-  setPuzzleControlShown(page.querySelector('#puzzleRetryBtn'), showRetry)
+  // Otherwise keep Retry in the first grid slot, but only enable it after a hard fail
+  // (enabled-looking Retry on a fresh board reads as "already stuck").
+  const retryBtn = page.querySelector('#puzzleRetryBtn')
+  const showRetry = !isAdaptiveCoachMode()
+  const enableRetry = Boolean(puzzleSolver?.failed || puzzleCoachActive)
+  setPuzzleControlShown(retryBtn, showRetry)
+  if (retryBtn) {
+    retryBtn.disabled = !enableRetry
+    retryBtn.title = enableRetry
+      ? 'Reset this puzzle and try again'
+      : 'Retry becomes available after a failed attempt'
+  }
   const canSave = canPersistPuzzle()
   const showSave = !currentCurated && (canSave || ctx.pwaBridgeActive)
   setPuzzleControlShown(saveBtn, showSave)
@@ -3160,8 +3256,6 @@ function updatePuzzleControlVisibility() {
       })
     }
   }
-  // Hide training-log until a solve; hide on every control refresh before solved.
-  if (!puzzleSolver?.solved) updateTrainingLogButton(false)
 }
 
 // Re-run control visibility when shell auth/ownerCanJournalHere arrives after the puzzle loads.
@@ -3438,7 +3532,7 @@ function wirePuzzleControls() {
   if (page._wikiPuzzleWired) return
   page._wikiPuzzleWired = true
   // "New Puzzle" draws another puzzle with the current filters; the chooser lives on
-  // its own "Edit Filters" button so a new puzzle doesn't re-prompt every time.
+  // its own "Edit Puzzle Filters" button so a new puzzle doesn't re-prompt every time.
   page.querySelector('#puzzleNextBtn')?.addEventListener('click', () => loadNextPuzzle())
   page.querySelector('#puzzleEditFiltersBtn')?.addEventListener('click', () =>
     promptPuzzleFilters(() => {
@@ -3463,7 +3557,6 @@ function wirePuzzleControls() {
   })
   page.querySelector('#puzzleRevealBtn')?.addEventListener('click', () => revealPuzzleSolution())
   page.querySelector('#puzzleSaveBtn')?.addEventListener('click', () => saveCurrentPuzzleToItem())
-  page.querySelector('#puzzleTrainingLogBtn')?.addEventListener('click', () => certifyTrainingLogFromUi())
   page.querySelector('#puzzleChooseModeBtn')?.addEventListener('click', () => ctx.proceedReturnToStartMenu())
   page.querySelector('#puzzle-local-puzzles-btn')?.addEventListener('click', () => {
     const ready = getLocalPuzzleDownloadStatus().status === 'ready'

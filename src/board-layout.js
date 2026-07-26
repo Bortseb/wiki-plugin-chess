@@ -57,21 +57,33 @@ export function matchInstalledChessPwa(apps, { origin } = {}) {
 
 export const CHESS_PWA_INSTALLED_FLAG_PREFIX = 'wiki-chess-pwa-installed:'
 
+// IndexedDB-backed UI prefs bridge (set from chess-app via initUiPrefsBridge).
+let uiPrefsBridge = {
+  isPwaInstalled: () => false,
+  markPwaInstalled: () => {},
+  isHideInstallNudge: () => false,
+  setHideInstallNudge: () => {},
+}
+
+export function initUiPrefsBridge(bridge = {}) {
+  uiPrefsBridge = { ...uiPrefsBridge, ...bridge }
+}
+
 export function chessPwaInstalledFlagKey(origin = location.origin) {
   return `${CHESS_PWA_INSTALLED_FLAG_PREFIX}${origin}`
 }
 
 export function markChessPwaInstalled(origin = location.origin) {
   try {
-    localStorage.setItem(chessPwaInstalledFlagKey(origin), 'true')
+    uiPrefsBridge.markPwaInstalled(origin)
   } catch {
-    /* localStorage can be unavailable */
+    /* prefs unavailable */
   }
 }
 
 export function isChessPwaInstalledLocally(origin = location.origin) {
   try {
-    return localStorage.getItem(chessPwaInstalledFlagKey(origin)) === 'true'
+    return Boolean(uiPrefsBridge.isPwaInstalled(origin))
   } catch {
     return false
   }
@@ -128,12 +140,12 @@ export function initInstallNudge() {
       return
     }
     try {
-      if (localStorage.getItem('hide-install-nudge') === 'true') {
+      if (uiPrefsBridge.isHideInstallNudge()) {
         hideInstallNudgeElement(installNudge)
         return
       }
     } catch {
-      /* localStorage can be unavailable */
+      /* prefs unavailable */
     }
     installNudge.style.display = 'block'
   }
@@ -165,9 +177,9 @@ export function initInstallNudge() {
   }
   document.getElementById('close-button')?.addEventListener('click', () => {
     try {
-      localStorage.setItem('hide-install-nudge', 'true')
+      uiPrefsBridge.setHideInstallNudge(true)
     } catch {
-      /* localStorage can be unavailable */
+      /* prefs unavailable */
     }
     hideInstallNudgeElement(installNudge)
   })
@@ -689,10 +701,23 @@ function measurePanelMinWidth() {
     const summaryW = drawer.querySelector('.wiki-chess-captured-summary')?.scrollWidth || 0
     return Math.min(PANEL_MAX_RESERVE, Math.max(POPUP_SIDE_PANEL_MIN, Math.round(summaryW + 48)))
   }
+  // History | Captured default to a ~50/50 split (CSS: .wiki-chess-history-captured-row);
+  // reserve the sum of both sides' preferred widths: the widest move row plus the
+  // wider of the Captured heading and its widest one-line piece row. If the panel
+  // ends up narrower anyway, the piece rows (and move cells) wrap instead of
+  // scrolling — this reserve is what keeps each color's captures on a single line
+  // in the normal case.
   const historyW = drawer.querySelector('.history')?.scrollWidth || 0
-  const headingW = drawer.querySelector('.wiki-captured-heading')?.scrollWidth || 0
-  if (historyW > 0) {
-    const raw = historyW + headingW + PANEL_CHROME
+  const historyHeadingW = drawer.querySelector('.wiki-history-heading')?.scrollWidth || 0
+  const capturedHeadingW = drawer.querySelector('.wiki-captured-heading')?.scrollWidth || 0
+  let capturedRowW = 0
+  for (const row of drawer.querySelectorAll('.captured-pieces .wiki-captured-row')) {
+    capturedRowW = Math.max(capturedRowW, row.scrollWidth)
+  }
+  const historySide = Math.max(historyW, historyHeadingW)
+  const capturedSide = Math.max(capturedHeadingW, capturedRowW)
+  if (historySide > 0 || capturedSide > 0) {
+    const raw = historySide + capturedSide + PANEL_CHROME
     return Math.min(PANEL_MAX_RESERVE, Math.max(POPUP_SIDE_PANEL_MIN, Math.round(raw)))
   }
   return PANEL_MAX_RESERVE
@@ -1279,8 +1304,9 @@ export function fitPwaPlayWindow(page) {
 }
 
 // The Game controls drawer (history, captures, action buttons, settings, attributions)
-// is user-owned in every surface and layout. Defaults: all `.wiki-chess-drawer` panels
-// start open so players discover collapse themselves. sessionStorage remembers the last
+// is user-owned in every surface and layout. Defaults: `.wiki-chess-drawer` panels
+// start open (except Game settings and Attributions, which always boot collapsed —
+// see wireDrawerOpenMemory). sessionStorage remembers the last
 // open/closed set per wiki item for this tab (ephemeral — cleared when the tab goes
 // away). Layout changes (wide/columns vs narrow/stacked, resizes, ratio flips) must
 // never force open or closed — auto-toggling on layout change kept overriding the
@@ -1828,21 +1854,23 @@ function writeDrawerOpenMemory(state) {
 }
 
 // Expand game drawers by default; restore this tab's last open/closed set when present.
-// Game settings is the exception: it always boots collapsed, ignoring saved memory —
-// older builds persisted its open default without a user click, so restoring it would
-// keep reopening the panel.
+// Game settings and Attributions are the exception: they always boot collapsed,
+// ignoring saved memory — older builds persisted their open default without a user
+// click, so restoring it would keep reopening the panels.
 export function wireDrawerOpenMemory() {
   if (drawerOpenMemoryWired) return
   drawerOpenMemoryWired = true
   const saved = readDrawerOpenMemory() || {}
   const state = { ...saved }
   document.querySelectorAll('details.wiki-chess-drawer').forEach(el => {
+    // Settings / attributions boot collapsed (older builds persisted open without a click).
+    // Board settings on position/puzzle used to ship with HTML open="" — same default.
+    const alwaysStartClosed =
+      el.classList.contains('wiki-chess-game-settings-drawer') ||
+      el.classList.contains('wiki-chess-board-settings-drawer') ||
+      el.classList.contains('wiki-chess-thanks')
     const id = drawerMemoryId(el)
-    const open = el.classList.contains('wiki-chess-game-settings-drawer')
-      ? false
-      : typeof saved[id] === 'boolean'
-        ? saved[id]
-        : true
+    const open = alwaysStartClosed ? false : typeof saved[id] === 'boolean' ? saved[id] : true
     el.open = open
     state[id] = open
     el.addEventListener('toggle', () => {
@@ -2561,26 +2589,68 @@ function popupStateStorageKey() {
   return `${pwaStoragePrefix(restorePwaContext())}PopupState`
 }
 
+const POPUP_AUTH_KEYS = [
+  'signedInDisplayName',
+  'pageOnThisWiki',
+  'ownerCanJournalHere',
+  'viewerCanClaimWikiSeat',
+  'viewerSeatId',
+  'viewerAuthenticated',
+  'guestLocalStoragePersist',
+]
+
+function popupAuthFields(state) {
+  if (!state || typeof state !== 'object') return {}
+  const out = {}
+  const displayName = state.signedInDisplayName || state.ownerName
+  if (displayName) out.signedInDisplayName = displayName
+  for (const key of POPUP_AUTH_KEYS) {
+    if (key === 'signedInDisplayName') continue
+    if (state[key] !== undefined) out[key] = state[key]
+  }
+  return out
+}
+
+function hasPopupAuthFields(auth) {
+  return Boolean(
+    auth.signedInDisplayName ||
+      auth.pageOnThisWiki ||
+      auth.ownerCanJournalHere ||
+      auth.viewerCanClaimWikiSeat ||
+      auth.viewerAuthenticated,
+  )
+}
+
 // Session-only handoff for a popup that reloads before the wiki parent re-adopts it.
 // Not a durability SSOT — every ply must journal through the wiki shell
 // (`pageHandler.put` → origin, or yellow-halo local on failure).
+// Also keeps wiki auth flags so a mobile reload does not stick the padlock locked
+// while waiting for the opener to re-send SET_STATE / VIEWER_CONTEXT.
 export function rememberPopupState(state) {
   const text = state?.PGN || state?.chessState || state?.FEN
-  if (!text || typeof text !== 'string') return
-  const format = state?.format || getFormat(text) || 'PGN'
+  const auth = popupAuthFields(state)
+  const hasText = Boolean(text && typeof text === 'string')
+  if (!hasText && !hasPopupAuthFields(auth)) return
+  const prev = loadPopupState() || {}
+  const format = hasText
+    ? state?.format || getFormat(text) || 'PGN'
+    : state?.format || prev.format || 'MENU'
   const payload = {
+    ...prev,
     savedAt: Date.now(),
     format,
-    PGN: format === 'PGN' ? text : state?.PGN,
-    FEN: format === 'FEN' ? text : state?.FEN,
-    chessState: text,
-    mode: state?.mode,
-    playerColor: state?.playerColor,
-    gameType: state?.gameType,
-    gameSettings: state?.gameSettings,
-    signedInDisplayName: state?.signedInDisplayName || state?.ownerName,
-    itemId: state?.itemId || restorePwaContext().itemId,
-    pageKey: state?.pageKey || restorePwaContext().pageKey,
+    mode: state?.mode ?? prev.mode,
+    playerColor: state?.playerColor ?? prev.playerColor,
+    gameType: state?.gameType ?? prev.gameType,
+    gameSettings: state?.gameSettings ?? prev.gameSettings,
+    itemId: state?.itemId || prev.itemId || restorePwaContext().itemId,
+    pageKey: state?.pageKey || prev.pageKey || restorePwaContext().pageKey,
+    ...auth,
+  }
+  if (hasText) {
+    payload.PGN = format === 'PGN' ? text : state?.PGN
+    payload.FEN = format === 'FEN' ? text : state?.FEN
+    payload.chessState = text
   }
   try {
     sessionStorage.setItem(popupStateStorageKey(), JSON.stringify(payload))
@@ -2598,6 +2668,19 @@ function loadPopupState() {
   } catch {
     return null
   }
+}
+
+// Apply last-known auth flags into chessState before the opener answers. Safe no-op
+// when nothing was saved or journal access is already established.
+export function hydratePopupAuthFromSession(chessState) {
+  if (!chessState || typeof chessState !== 'object') return false
+  if (chessState.pageOnThisWiki || chessState.ownerCanJournalHere) return false
+  const saved = loadPopupState()
+  if (!saved || !hasPopupAuthFields(popupAuthFields(saved))) return false
+  for (const key of POPUP_AUTH_KEYS) {
+    if (saved[key] !== undefined && chessState[key] === undefined) chessState[key] = saved[key]
+  }
+  return Boolean(chessState.pageOnThisWiki || chessState.ownerCanJournalHere)
 }
 
 export function restorePopupWithoutOpener() {
@@ -2914,10 +2997,12 @@ export async function bridgeFetch(path, { method = 'GET', body } = {}) {
 
 const PWA_CLIENT_ONLY_ACTIONS = new Set([
   MSG.OPEN_SURVEY_PAGE,
+  MSG.SHOW_CRAWL_HITS_PAGE,
   MSG.CREATE_PREVIEW,
   MSG.MODE_CHANGED,
   MSG.SHELL_SESSION_FLAGS,
   MSG.FETCH_UI,
+  MSG.ALERT_UI,
   MSG.GAME_SETTINGS_CHANGED,
   MSG.PWA_INSTALLED,
   MSG.RESIZE,
@@ -3222,18 +3307,19 @@ function buildTransportApi(dispatch) {
     openSurveyPage: m(MSG.OPEN_SURVEY_PAGE),
     openLeaderboardPage: m(MSG.OPEN_LEADERBOARD_PAGE),
     openGamePage: m(MSG.OPEN_GAME_PAGE),
+    showCrawlHitsPage: m(MSG.SHOW_CRAWL_HITS_PAGE),
     lookupSiteDisplay: m(MSG.LOOKUP_SITE_DISPLAY),
     fetchPuzzlePages: m(MSG.FETCH_PUZZLE_PAGES),
-    certifyTrainingLog: m(MSG.CERTIFY_TRAINING_LOG),
+    fetchLocalAcademyProgress: m(MSG.FETCH_LOCAL_ACADEMY_PROGRESS),
     surveyStatus: m(MSG.SURVEY_STATUS, { spread: false }),
     fetchUi: m(MSG.FETCH_UI),
+    alertUi: m(MSG.ALERT_UI),
     abandonFetches: m(MSG.ABANDON_FETCHES, { spread: false }),
     realtimePresence: m(MSG.REALTIME_PRESENCE),
     realtimeSignal: m(MSG.REALTIME_SIGNAL),
     realtimeStatus: m(MSG.REALTIME_STATUS),
     requestRealtimeStatus: m(MSG.REQUEST_REALTIME_STATUS, { spread: false }),
     requestSwitchGameMode: m(MSG.REQUEST_SWITCH_GAME_MODE, { spread: false }),
-    requestOpenPositionEditor: m(MSG.REQUEST_OPEN_POSITION_EDITOR),
     pasteApply: m(MSG.PASTE_APPLY),
     gameReady: m(MSG.GAME_READY),
     resize: m(MSG.RESIZE),
@@ -3253,7 +3339,7 @@ export const shellTransport = buildTransportApi(msg => sendTransport(msg))
 
 // # Namespace Exports
 
-// Wiki transport surface — prefer this over importing each helper by name.
+// Wiki transport surface — prefer Transport.* (or `import * as BoardLayout`) over new flat imports.
 export const Transport = Object.freeze({
   send: sendTransport,
   enrich: enrichTransport,
@@ -3266,7 +3352,7 @@ export const Transport = Object.freeze({
   applyLocalOnlyHalo,
 })
 
-// Installed-PWA / popup session surface — prefer this over importing each helper by name.
+// Installed-PWA / popup session surface — prefer PWA.* over new flat aliases.
 export const PWA = Object.freeze({
   BRIDGE_BASE: PWA_BRIDGE_BASE,
   isInstalled: isInstalledPwa,
@@ -3288,6 +3374,7 @@ export const PWA = Object.freeze({
   resolveBootIntent,
   restorePopupWithoutOpener,
   rememberPopupState,
+  hydratePopupAuthFromSession,
   persistState: persistPwaState,
   saveLocalSession: savePwaLocalSession,
   clearLocalSession: clearPwaLocalSession,

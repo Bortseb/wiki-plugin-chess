@@ -63,9 +63,10 @@ body.wiki-embedded .wiki-modal-embedded .wiki-modal-body {
   overflow-y: visible;
 }
 
-/* Board overlay: must beat the in-flow embedded rules above (same classes on the root). */
+/* Board overlay: must beat the in-flow embedded rules above (same classes on the root).
+   Use fixed (iframe viewport) so tall wiki pages don't center the dialog off-screen on mobile. */
 body.wiki-embedded .wiki-modal-root.wiki-modal-embedded.wiki-modal-board-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 20;
   display: flex;
@@ -1942,6 +1943,28 @@ body.wiki-embedded .wiki-chess-theme-toggle {
   flex-shrink: 0;
 }
 
+/* Duplicate captures stack into one tile with a count badge (e.g. one pawn sprite
+   with "5"), so the strip never outgrows one tile per piece type. */
+.wiki-captured-piece {
+  position: relative;
+}
+
+.wiki-captured-count {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  min-width: 0.85rem;
+  padding: 0 0.15rem;
+  border-radius: 0.5rem;
+  background: var(--bs-secondary-color, #666);
+  color: var(--bs-body-bg, #fff);
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 0.85rem;
+  text-align: center;
+  pointer-events: none;
+}
+
 .captured-pieces .wiki-captured-row {
   display: flex;
   flex-wrap: wrap;
@@ -1949,6 +1972,11 @@ body.wiki-embedded .wiki-chess-theme-toggle {
   gap: 0.1rem 0.15rem;
   min-height: 1.75rem;
   margin-bottom: 0.35rem;
+}
+
+/* No captures yet: drop the reserved piece-row height so the heading alone sits tight. */
+.captured-pieces .wiki-captured-row:empty {
+  display: none;
 }
 
 .captured-pieces .wiki-captured-row:last-child {
@@ -2043,23 +2071,33 @@ body.wiki-embedded .wiki-chess-theme-toggle {
 }
 
 .history td.num {
-  padding: 0.1rem 0.4rem 0.1rem 0;
+  padding: 0.1rem 0.25rem 0.1rem 0;
   white-space: nowrap;
   vertical-align: middle;
   color: #6c757d;
 }
 
 .history td.ply {
-  white-space: nowrap;
+  /* Wrapping (not nowrap) keeps the move list free of horizontal scrollbars in narrow
+     columns; the SAN itself stays unbreakable via .wiki-ply-san, so only the comment
+     marker can drop to a second line. */
+  white-space: normal;
   vertical-align: middle;
   line-height: 1.4;
-  padding: 0.15rem 0.65rem;
+  /* Tight horizontal padding: every px here doubles (two ply cells per row) and the
+     History column is narrow in the wiki embed. */
+  padding: 0.15rem 0.3rem;
+}
+
+/* A move (figurine + SAN) never breaks internally. */
+.history .wiki-ply-san {
+  white-space: nowrap;
 }
 
 /* Black column: extra leading space + divider after White's move */
 .history td.ply + td.ply {
   border-left: 1px solid var(--bs-border-color, #adb5bd);
-  padding-left: 0.85rem;
+  padding-left: 0.5rem;
 }
 
 .history .wiki-staunty-piece-inline {
@@ -2276,11 +2314,12 @@ body.wiki-pwa .wiki-chess-drawer:not(.wiki-fen-start-drawer) {
   margin: 0.25rem 0 0;
 }
 
+/* Flush with the drawer edge so attribution blurbs use the full column width
+   (fewer wrapped lines on phone). Vertical padding only. */
 body.wiki-popup .wiki-chess-thanks .wiki-chess-thanks-body,
 body.wiki-pwa .wiki-chess-thanks .wiki-chess-thanks-body,
 body.wiki-embedded .wiki-chess-thanks-body {
-  padding-top: 0.35rem;
-  padding-bottom: 0.35rem;
+  padding: 0.35rem 0;
 }
 
 body.wiki-popup .wiki-chess-thanks-entry + .wiki-chess-thanks-entry,
@@ -2316,6 +2355,7 @@ body.wiki-embedded .wiki-chess-thanks-body {
 .wiki-chess-thanks-list {
   list-style: none;
   padding-left: 0;
+  padding-right: 0;
   margin: 0;
 }
 
@@ -2366,6 +2406,7 @@ body.wiki-embedded .wiki-chess-thanks-body {
 
 body.wiki-embedded .wiki-chess-thanks-list {
   padding-left: 0;
+  padding-right: 0;
 }
 
 body.wiki-embedded .wiki-chess-thanks-entry + .wiki-chess-thanks-entry {
@@ -2441,15 +2482,20 @@ body.wiki-popup .wiki-chess-thanks .wiki-chess-thanks-body {
   margin-top: 0.15rem;
 }
 
-/* All footer action buttons share one responsive grid. The three logical groups use
-   `display: contents` so their buttons become direct grid items here. Equal-width
-   tracks (as many ≥11rem columns as fit) keep every button the same size — the old
-   flex-grow wrap let each row settle at different widths and looked ragged. */
+/* All footer action buttons share one wrapping row. The three logical groups use
+   `display: contents` so their buttons become direct flex items here, letting them
+   flow into a single responsive row (and wrap together when space is tight).
+   width + margin-inline keep the group centered when a parent caps max-width. */
 .wiki-chess-actions {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
   gap: 0.4rem;
+  width: 100%;
+  margin-inline: auto;
   padding: 0.15rem 0 0.35rem;
+  box-sizing: border-box;
 }
 
 .wiki-chess-actions .wiki-chess-nav-actions,
@@ -2458,12 +2504,14 @@ body.wiki-popup .wiki-chess-thanks .wiki-chess-thanks-body {
   display: contents;
 }
 
-/* Game-footer buttons fill their grid track (min-width 0 so a tight track can shrink
-   them); the position editor keeps the flex-wrap treatment so its buttons match. */
+/* Prefer ~4 columns (basis ≈ 25% minus gap) so a 7-button footer wraps as 4+3
+   instead of 6+1 with a full-width orphan — Share PGN was stretching alone because
+   flex-grow filled the leftover row. Buttons still grow to fill each row; nowrap
+   min-content forces fewer columns when the board is narrow. The position editor
+   uses the same treatment so its buttons match the game footer. */
 .wiki-chess-actions .wiki-chess-action-btn,
 .wiki-chess-fen-actions .wiki-chess-action-btn {
   flex: 1 1 calc(25% - 0.3rem);
-  min-width: 0;
   white-space: nowrap;
   min-height: 2.75rem;
   display: inline-flex;
@@ -2473,25 +2521,57 @@ body.wiki-popup .wiki-chess-thanks .wiki-chess-thanks-body {
   padding-inline: 0.55rem;
 }
 
+/* Narrow PWA / phone: 25% basis forces a ragged 4-across wrap on position (and game)
+   footers. Two equal columns keep labels readable and rows aligned. Two-line min-height
+   keeps every button the same height when a long label (e.g. "Start Game from Position")
+   wraps — flex line stretch alone only equalizes within a row. */
+@media (max-width: 575.98px) {
+  .wiki-chess-actions .wiki-chess-action-btn,
+  .wiki-chess-fen-actions .wiki-chess-action-btn {
+    /* Equal pair width without grow-to-fill so odd last rows stay centered. */
+    flex: 0 1 calc(50% - 0.4rem);
+    min-width: 0;
+    max-width: calc(50% - 0.2rem);
+    min-height: 3.75rem;
+    white-space: normal;
+    box-sizing: border-box;
+  }
+}
+
+/* Phone-width PWA (page gutters stripped at 480px): stack position actions so long
+   labels like "Start Game from Position" never overlap. */
+@media (max-width: 480px) {
+  body.wiki-popup .wiki-chess-fen-actions,
+  body.wiki-pwa .wiki-chess-fen-actions {
+    width: 100%;
+    max-width: 100%;
+    padding-inline: 0.65rem;
+    box-sizing: border-box;
+  }
+
+  body.wiki-popup .wiki-chess-fen-actions .wiki-chess-action-btn,
+  body.wiki-pwa .wiki-chess-fen-actions .wiki-chess-action-btn {
+    flex: 1 1 100%;
+  }
+}
+
 /* Side-panel layout (controls beside the board): two equal columns so the button
    stack stays short and the panel doesn't run past the bottom of the board. Labels
    may wrap to a second line inside the narrow panel — that beats a 7-row column. */
 @media (min-width: 946px) {
-  body.wiki-popup:not(.wiki-popup-stack) .wiki-chess-history-drawer .wiki-chess-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   body.wiki-popup:not(.wiki-popup-stack) .wiki-chess-history-drawer .wiki-chess-actions .wiki-chess-action-btn {
+    flex: 1 1 calc(50% - 0.4rem);
+    min-width: 0;
+    min-height: 3.75rem;
     white-space: normal;
   }
 }
 
 @media (min-width: 992px) {
-  body.wiki-direct-tab .wiki-chess-history-drawer .wiki-chess-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   body.wiki-direct-tab .wiki-chess-history-drawer .wiki-chess-actions .wiki-chess-action-btn {
+    flex: 1 1 calc(50% - 0.4rem);
+    min-width: 0;
+    min-height: 3.75rem;
     white-space: normal;
   }
 }
@@ -2547,23 +2627,35 @@ body.wiki-popup .wiki-chess-thanks .wiki-chess-thanks-body {
 .wiki-chess-fen-actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
   gap: 0.4rem;
+  width: 100%;
+  margin-inline: auto;
   padding: 0.15rem 0;
+  box-sizing: border-box;
 }
 
 .wiki-chess-history-drawer {
   margin-top: 0.15rem;
 }
 
-/* Game-panel drawer summary: always reads "Controls:", collapsed or expanded. When
-   collapsed, the captured material ("Captured Pieces" heading over the white/black
-   rows, mirroring the expanded panel) appears pushed to the right edge so it reads
-   apart from the heading; when expanded it hides (the full Captured Pieces panel is
-   right below) and the heading sits over the move history. Collapsed, this line is
-   the only chrome left. */
+/* Game-panel drawer summary: expanded reads "Controls:" over the move history.
+   Collapsed, the captured-pieces strip sits on top with "▸ Controls:" below it. */
 .wiki-chess-game-controls-drawer > summary {
   gap: 0.35rem;
   min-width: 0;
+}
+
+.wiki-chess-game-controls-drawer:not([open]) > summary {
+  flex-wrap: wrap;
+}
+
+/* Collapsed: captured strip takes the first line (order -1 beats the ▸ ::before and
+   the label, both order 0), then "▸ Controls:" wraps onto the line below it. */
+.wiki-chess-game-controls-drawer:not([open]) > summary .wiki-chess-game-controls-summary-collapsed {
+  flex-basis: 100%;
+  order: -1;
 }
 
 /* "Controls:" is the panel's top-level heading — render it a step larger than the
@@ -2585,11 +2677,12 @@ body.wiki-embedded .wiki-chess-game-controls-drawer[open] > summary {
   display: none;
 }
 
-/* Fills the rest of the summary row and right-aligns the captured strip in it. */
+/* Full-width first line of the collapsed summary; the captured strip sits
+   left-aligned in it, mirroring the expanded panel. */
 .wiki-chess-game-controls-summary-collapsed {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.6rem;
   min-width: 0;
   flex: 1 1 auto;
@@ -2609,6 +2702,12 @@ body.wiki-embedded .wiki-chess-game-controls-drawer[open] > summary {
   display: none;
 }
 
+/* No captures yet: drop the empty captured strip so the collapsed summary is just
+   "▸ Controls:" (until material is taken). */
+.wiki-chess-game-controls-summary-collapsed:not(:has(.wiki-captured-piece)) {
+  display: none;
+}
+
 /* Mirrors .wiki-captured-heading so collapsed and expanded captures read the same. */
 .wiki-chess-captured-label {
   flex: 0 0 auto;
@@ -2619,9 +2718,10 @@ body.wiki-embedded .wiki-chess-game-controls-drawer[open] > summary {
   color: var(--bs-secondary-color, #666);
 }
 
-/* Keep the right-aligned strip clear of the fixed dark-mode toggle in the corner:
-   when the panel is collapsed the summary is the last line in the embed (and can be
-   in a height-trimmed popup/PWA window), so the toggle would sit on top of it. */
+/* Keep a wide (scrolling) strip's right end clear of the fixed dark-mode toggle in
+   the corner: when the panel is collapsed the summary is the last chrome in the embed
+   (and can be in a height-trimmed popup/PWA window), so the toggle would sit on top
+   of it. */
 body.wiki-embedded .wiki-chess-game-controls-summary-collapsed {
   padding-right: 2.6rem;
 }
@@ -2750,10 +2850,10 @@ body.wiki-direct-tab .wiki-chess-game-controls-drawer[open] > summary::before {
 }
 
 /* chess-console.scss gives .chess-console-left a 20px top margin (meant for its own
-   side-by-side layout); inside the controls drawer it just pushes Move History away
-   from the "Controls:" summary. */
+   side-by-side layout); inside the controls drawer, replace it with a smaller gap so
+   Move History sits just clear of the "Controls:" summary. */
 .wiki-chess-history-drawer .chess-console-left {
-  margin-top: 0;
+  margin-top: 0.5rem;
 }
 
 .wiki-chess-history-drawer .wiki-chess-history-captured-row {
@@ -2768,9 +2868,10 @@ body.wiki-direct-tab .wiki-chess-game-controls-drawer[open] > summary::before {
   min-width: 0;
 }
 
-/* Visual divider between the History column and the Captured Pieces column. */
+/* Visual divider between the History column and the Captured Pieces column — full
+   column height (stretch) so it reads as the midline of the pair. */
 .wiki-chess-history-drawer .wiki-chess-history-captured-row > .col-6:last-child {
-  border-left: 1px solid var(--bs-border-color, #dee2e6);
+  border-left: 2px solid var(--bs-border-color, #dee2e6);
   padding-left: calc(var(--bs-gutter-x) * 0.5 + 0.5rem);
 }
 
@@ -2792,33 +2893,20 @@ body.wiki-direct-tab .wiki-chess-game-controls-drawer[open] > summary::before {
 }
 
 .wiki-chess-history-drawer .wiki-chess-history-scroll {
-  overflow-x: visible;
+  /* Never a horizontal scrollbar: with overflow-y:auto, `visible` would compute to
+     `auto` and show one whenever a move row outgrows the column. Cells wrap instead
+     (see .history td.ply). */
+  overflow-x: hidden;
   overflow-y: auto;
-  min-height: 0;
+  /* Grow with content when the game is short (just "1." at start); cap at 4 move
+     rows (≈ 1.7rem each). No min-height / height:100% — those reserved a tall empty
+     band beside Captured before any moves. */
+  max-height: 6.8rem;
 }
 
 .wiki-chess-history-drawer .wiki-chess-captured-scroll {
   overflow: visible;
   max-height: none;
-}
-
-.wiki-chess-history-drawer .wiki-chess-history-captured-row {
-  align-items: flex-start;
-}
-
-.wiki-chess-history-drawer .wiki-chess-history-captured-row > .col-6:last-child {
-  align-self: flex-start;
-}
-
-/* Popup / PWA: cap the move list to the board height so its scrollbar stays in-column. */
-body.wiki-popup .wiki-chess-history-drawer .wiki-chess-history-scroll {
-  max-height: min(18rem, var(--wiki-chess-board-cap, 560px));
-}
-
-@media (min-width: 946px) {
-  body.wiki-popup:not(.wiki-popup-stack) .wiki-chess-history-drawer .wiki-chess-history-scroll {
-    max-height: var(--wiki-chess-board-cap, 560px);
-  }
 }
 
 /* Non-popup layouts: keep the (nowrap) move list contained in its own column, scrolling
@@ -2833,30 +2921,34 @@ body.wiki-popup .wiki-chess-history-drawer .wiki-chess-history-scroll {
   overflow: visible;
 }
 
-/* All layouts (wiki iframe, popup / PWA window, direct tab): avoid a useless horizontal
-   scrollbar on the History column. History is sized to its own content (its widest move
-   row — comment markers included) and Captured Pieces takes the remaining width, so
-   nothing overflows while there is spare room in the row. Only when the move list alone
-   is wider than the whole row does History cap at 100% and fall back to the horizontal
-   scroll-in-column behavior above. In the popup, board-layout.js additionally measures
-   the panel's required width, reserves it beside the board, and otherwise drops the
-   whole panel below the board — so the panel only moves beside the board when it fits
-   there without scrollbars. */
+/* All layouts (wiki iframe, popup / PWA window, direct tab): History | Captured with a
+   full-height divider. Keep ~50/50 so History is not cramped while Captured is sparse;
+   Captured may claim more than half only when its content min-width requires it
+   (piece rows wrap first). In the popup, board-layout.js still measures the panel
+   and may drop it below the board when it would not fit beside it. */
 .wiki-chess-history-drawer .wiki-chess-history-captured-row {
   display: flex;
   flex-wrap: nowrap;
-  align-items: flex-start;
+  align-items: stretch;
+  justify-content: center;
+  width: 100%;
 }
 
 .wiki-chess-history-drawer .wiki-chess-history-captured-row > .col-6:first-child {
-  flex: 0 0 auto;
-  width: auto;
-  max-width: 100%;
+  flex: 1 1 50%;
+  width: 50%;
+  max-width: 65%;
+  min-width: 0;
+  align-self: stretch;
 }
 
 .wiki-chess-history-drawer .wiki-chess-history-captured-row > .col-6:last-child {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 50%;
+  width: 50%;
+  max-width: none;
+  /* At least half the row; grow past half only when piece content needs the room. */
+  min-width: 50%;
+  align-self: stretch;
 }
 
 .wiki-chess-history-drawer .chess-console-left .history {
@@ -2933,6 +3025,13 @@ body.wiki-popup .wiki-chess-history-drawer .wiki-chess-history-scroll {
 
 .wiki-chess-player-text .wiki-chess-wiki-site-link {
   color: inherit;
+}
+
+/* Player bars: display name leads; domain trails smaller (My Chess Games pattern). */
+.wiki-chess-player-text .wiki-chess-wiki-site-label {
+  font-weight: 400;
+  font-size: 0.85em;
+  opacity: 0.85;
 }
 
 .wiki-chess-player-input {
@@ -3041,10 +3140,18 @@ body.wiki-popup .wiki-chess-game-settings-drawer {
 /* Keep the blue action buttons no wider than the board as a group. In the wide/columns
    popup layout the below-board footer spans the whole board+panel cluster
    (--wiki-chess-cluster-width), so without this the buttons stretched out under the
-   History & Captured panel. Capping to the live board width makes them wrap within the
-   board's footprint instead, matching the Game settings card below. */
-body.wiki-popup .wiki-chess-actions {
+   History & Captured panel. Cap to the live board width and center so pairs stay
+   aligned under the board in every mode (embed, popup, stacked PWA). */
+body.wiki-popup .wiki-chess-actions,
+body.wiki-pwa .wiki-chess-actions,
+body.wiki-embedded .wiki-chess-actions,
+body.wiki-direct-tab .wiki-chess-actions,
+body.wiki-popup .wiki-chess-fen-actions,
+body.wiki-pwa .wiki-chess-fen-actions,
+body.wiki-embedded .wiki-chess-fen-actions,
+body.wiki-direct-tab .wiki-chess-fen-actions {
   max-width: var(--wiki-chess-board-width, 100%);
+  margin-inline: auto;
 }
 
 /* Attributions sits in the same below-board footer cluster as the action buttons and
@@ -3052,6 +3159,7 @@ body.wiki-popup .wiki-chess-actions {
    Captured in the wide/columns popup layout. */
 body.wiki-popup .wiki-chess-thanks {
   max-width: var(--wiki-chess-board-width, 100%);
+  margin-inline: auto;
 }
 
 .wiki-chess-game-settings-body .form-check-label {
@@ -3503,7 +3611,25 @@ body.wiki-popup .wiki-chess-history-drawer .captured-pieces {
 
 .wiki-chess-annotation-add {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
   white-space: nowrap;
+  /* Icon-only by default; label expands on hover / keyboard focus. */
+  min-width: 2rem;
+  min-height: 2rem;
+  padding-left: 0.4rem;
+  padding-right: 0.4rem;
+}
+
+.wiki-chess-annotation-add-label {
+  display: none;
+}
+
+.wiki-chess-annotation-add:hover .wiki-chess-annotation-add-label,
+.wiki-chess-annotation-add:focus-visible .wiki-chess-annotation-add-label {
+  display: inline;
 }
 
 .wiki-chess-annotation-add[hidden] {
@@ -3632,9 +3758,10 @@ body.wiki-popup .wiki-chess-history-drawer .captured-pieces {
   outline-offset: 2px;
 }
 
-/* Speech-bubble marker on a commented move in the history list. */
+/* Speech-bubble marker on a commented move in the history list. Small on purpose:
+   it rides along in every commented cell of the narrow History column. */
 .history .ply-comment {
-  font-size: 14px;
+  font-size: 12px;
   opacity: 0.8;
   cursor: help;
 }
@@ -4382,7 +4509,8 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
   color: #495057;
   cursor: pointer;
 }
-/* Visible-federation hop dials — under the view filters (wiki embed, popup, and PWA). */
+/* Visible-federation hop dials — under the view filters (wiki embed, popup, and PWA).
+   Collapsed by default; summary keeps title, dial values, and blocked count visible. */
 .wiki-chess-lb-hop-graph {
   width: 100%;
   margin-top: 0.35rem;
@@ -4391,29 +4519,76 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
 .wiki-chess-lb-hop-graph:not([hidden]) {
   display: block !important;
 }
-.wiki-chess-lb-hop-graph-top {
+.wiki-chess-lb-hop-details {
+  margin: 0;
+}
+.wiki-chess-lb-hop-details-summary {
+  list-style: none;
+  cursor: pointer;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem 1rem;
-  margin-bottom: 0.45rem;
+  gap: 0.35rem 0.75rem;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  min-height: 2.75rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+.wiki-chess-lb-hop-details-summary::-webkit-details-marker {
+  display: none;
+}
+.wiki-chess-lb-hop-details-summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-right: 2px solid var(--bs-secondary-color, #495057);
+  border-bottom: 2px solid var(--bs-secondary-color, #495057);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  margin-right: 0.15rem;
+  align-self: center;
+}
+.wiki-chess-lb-hop-details[open] > .wiki-chess-lb-hop-details-summary::before {
+  transform: rotate(45deg);
+}
+.wiki-chess-lb-hop-details-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #6c757d;
+  letter-spacing: 0.02em;
+}
+.wiki-chess-lb-hop-details-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #495057;
+}
+.wiki-chess-lb-hop-details-body {
+  padding-top: 0.45rem;
 }
 .wiki-chess-lb-hop-blocked {
   display: flex;
   align-items: baseline;
   gap: 0.4rem;
   line-height: 1;
+  margin-left: auto;
 }
 .wiki-chess-lb-hop-blocked-count {
-  font-size: 2rem;
+  font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: #212529;
   font-variant-numeric: tabular-nums;
 }
 .wiki-chess-lb-hop-blocked-label {
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   font-weight: 600;
   color: #6c757d;
 }
@@ -4648,15 +4823,14 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
   justify-content: flex-start;
   flex: 0 0 auto;
   gap: 0.12rem;
-  min-width: 2.75rem;
+  min-width: 3.25rem;
   padding-top: 0.05rem;
 }
 .wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-result {
   margin: 0;
 }
-/* Start date + time live under the badge, leaving the text column to the names. */
-.wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-date,
-.wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-time {
+/* Compact YY-MM-DD under the badge; full start/end details are on the title tooltip. */
+.wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-date {
   display: block;
   color: #6c757d;
   font-weight: 400;
@@ -4665,19 +4839,11 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
   white-space: nowrap;
   text-align: center;
 }
-/* Wrap "2026.07.17" at the <wbr> dot breaks so the date stacks under the badge instead
-   of widening the badge column. width: min-content keeps the flex column sized to the
-   badge, not to the unwrapped date. */
-.wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-date {
-  white-space: normal;
-  width: min-content;
-}
 /* Drag-to-select convention: I-beam over copyable text (and the blank space beside it);
    the badge keeps the pointer as the "this row opens the game" affordance. */
 .wiki-chess-lb-survey-section .wiki-chess-lb-game-link .wiki-chess-lb-game-text,
 .wiki-chess-lb-survey-section .wiki-chess-lb-game-link .wiki-chess-lb-game-event,
-.wiki-chess-lb-survey-section .wiki-chess-lb-game-link .wiki-chess-lb-game-date,
-.wiki-chess-lb-survey-section .wiki-chess-lb-game-link .wiki-chess-lb-game-time {
+.wiki-chess-lb-survey-section .wiki-chess-lb-game-link .wiki-chess-lb-game-date {
   cursor: text;
 }
 .wiki-chess-lb-survey-section .wiki-chess-lb-game-players {
@@ -4727,7 +4893,8 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  flex: 1 1 auto;
+  /* Natural width (shrink-only) so "Winner!" sits right after the domain, not flushed right. */
+  flex: 0 1 auto;
 }
 /* Display name leads; the wiki domain trails smaller so the name stays the anchor. */
 .wiki-chess-lb-survey-section .wiki-chess-lb-game-seat-name .wiki-chess-wiki-site-label {
@@ -4880,7 +5047,8 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
 [data-bs-theme='dark'] .wiki-chess-lb-survey-details > summary {
   border-bottom-color: rgba(255, 255, 255, 0.35);
 }
-[data-bs-theme='dark'] .wiki-chess-lb-survey-details > summary::before {
+[data-bs-theme='dark'] .wiki-chess-lb-survey-details > summary::before,
+[data-bs-theme='dark'] .wiki-chess-lb-hop-details-summary::before {
   border-right-color: #dee2e6;
   border-bottom-color: #dee2e6;
 }
@@ -4894,8 +5062,7 @@ body.wiki-pwa #leaderboard .wiki-chess-lb-table tbody td.wiki-chess-lb-rating {
   color: #f8f9fa;
 }
 [data-bs-theme='dark'] .wiki-chess-lb-survey-section .wiki-chess-lb-game-meta,
-[data-bs-theme='dark'] .wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-date,
-[data-bs-theme='dark'] .wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-time {
+[data-bs-theme='dark'] .wiki-chess-lb-survey-section .wiki-chess-lb-game-result-col .wiki-chess-lb-game-date {
   color: #dee2e6;
 }
 [data-bs-theme='dark'] .wiki-chess-lb-survey-section .wiki-chess-lb-game-winner {
@@ -5121,6 +5288,15 @@ body.wiki-pwa .wiki-chess-pwa-page-chrome-page.container {
   align-items: center;
   gap: 0.65rem 1rem;
 }
+.wiki-chess-install-flag-preview {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 0.35rem;
+  border: 1px solid rgba(102, 77, 3, 0.35);
+  background: #fff;
+}
 .wiki-chess-install-nudge-text {
   flex: 1 1 14rem;
   min-width: 0;
@@ -5252,6 +5428,18 @@ body.wiki-pwa-local-only {
   margin-left: 0.35rem;
   vertical-align: baseline;
 }
+/* Last-crawl site/game counts → ghost page of FedWiki references. */
+.wiki-chess-lb-survey-update .wiki-chess-lb-crawl-stat-link {
+  margin-left: 0;
+  font-size: inherit;
+  line-height: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+.wiki-chess-lb-survey-update .wiki-chess-lb-crawl-stat-link:hover,
+.wiki-chess-lb-survey-update .wiki-chess-lb-crawl-stat-link:focus-visible {
+  text-decoration: underline;
+}
 /* The viewer's own row — paint cells (not the <tr>) so Bootstrap's cell backgrounds
    cannot leave a stray blue strip under the two-line Name column. Marker is an inset
    bar so the narrow # column never overflows a ▸ into the name. */
@@ -5309,10 +5497,25 @@ body.wiki-pwa-local-only {
 .wiki-chess-lb-actions-top .wiki-chess-action-btn {
   white-space: nowrap;
 }
-/* Reach buttons keep Bootstrap btn-group layout; wrap if the toolbar is narrow. */
+/* View reach: one segmented control (pick exactly one). Stay joined on narrow
+   toolbars — scroll horizontally instead of wrapping into separate action-looking buttons. */
 .wiki-chess-lb-modes {
-  flex-wrap: wrap;
+  display: inline-flex;
+  flex-wrap: nowrap;
   max-width: 100%;
+  overflow-x: auto;
+  vertical-align: top;
+}
+.wiki-chess-lb-modes.btn-group > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* Pressed segment: solid fill so the exclusive choice reads clearly vs outline action buttons. */
+.wiki-chess-lb-modes.btn-group > .btn[aria-pressed='true'] {
+  color: #fff;
+  background-color: #0d6efd;
+  border-color: #0d6efd;
+  z-index: 1;
 }
 /* The interactive menu (reach + actions + ranking controls) reads as one toolbar, set
    off from the results below by a divider so the two zones are visually distinct.
@@ -5578,6 +5781,8 @@ body.wiki-pwa-local-only {
 [data-bs-theme='dark'] .wiki-chess-lb-rank,
 [data-bs-theme='dark'] .wiki-chess-lb-filter-label,
 [data-bs-theme='dark'] .wiki-chess-lb-reliable,
+[data-bs-theme='dark'] .wiki-chess-lb-hop-details-title,
+[data-bs-theme='dark'] .wiki-chess-lb-hop-details-meta,
 [data-bs-theme='dark'] .wiki-chess-lb-hop-blocked-label,
 [data-bs-theme='dark'] .wiki-chess-lb-hop-field,
 [data-bs-theme='dark'] .wiki-chess-lb-host,

@@ -84,11 +84,13 @@ export function queryHasPuzzleFilters(filters = {}) {
   return Object.keys(filters).length > 0
 }
 
-// Sample the indexed CSV to estimate a filtered offline export size.
+// Sample the indexed CSV to estimate a filtered offline export size. With ~5M
+// rows, each matching sample moves the count by totalCount/sampleSize — 2000
+// samples keep that granularity in the low thousands for rare filters.
 export async function estimateFilteredPuzzleDatabase(
   { offsets, fd, readLine },
   filters = {},
-  { fullBytes = 0, sampleSize = 500 } = {},
+  { fullBytes = 0, sampleSize = 2000 } = {},
 ) {
   const totalCount = offsets?.length ? Math.max(0, offsets.length - 1) : 0
   if (!queryHasPuzzleFilters(filters) || !offsets?.length || !fd) {
@@ -377,11 +379,42 @@ async function readLineAt(fd, offset) {
   return null
 }
 
+// Sequential rescue when rejection sampling misses: filters matching well under
+// 1% of the database (still thousands of puzzles) routinely lose all 80 random
+// draws. Chunked forward reads from a random line keep this to a few MB of I/O
+// even when nothing matches at all.
+const PUZZLE_SCAN_MAX_LINES = 20000
+const PUZZLE_SCAN_CHUNK_BYTES = 1 << 20
+
+async function scanPuzzleFromRandomOffset(filters) {
+  const n = state.offsets.length
+  let idx = 1 + Math.floor(Math.random() * Math.max(1, n - 1))
+  let scanned = 0
+  const buf = Buffer.alloc(PUZZLE_SCAN_CHUNK_BYTES)
+  while (scanned < PUZZLE_SCAN_MAX_LINES) {
+    if (idx >= n) idx = 1 // wrap past EOF, skipping the header row
+    const { bytesRead } = await state.fd.read(buf, 0, buf.length, state.offsets[idx])
+    if (!bytesRead) break
+    const pieces = buf.toString('utf8', 0, bytesRead).split('\n')
+    // The final piece is either a partial line (chunk boundary) or '' (EOF);
+    // the next iteration re-reads it from its own line offset.
+    const lines = pieces.slice(0, -1)
+    if (!lines.length) break
+    for (const line of lines) {
+      if (scanned >= PUZZLE_SCAN_MAX_LINES) break
+      scanned++
+      const puzzle = parsePuzzleRow(line)
+      if (puzzle && puzzleMatchesFilters(puzzle, filters)) return puzzle
+    }
+    idx += lines.length
+  }
+  return null
+}
+
 async function randomPuzzle(filters = {}) {
   if (state.status !== 'ready' || !state.offsets || !state.fd) return null
   const n = state.offsets.length
   if (!n) return null
-  const wanted = filters.themes ? new Set(filters.themes) : null
   let fallback = null
   for (let i = 0; i < 80; i++) {
     const idx = Math.floor(Math.random() * n)
@@ -389,14 +422,14 @@ async function randomPuzzle(filters = {}) {
     const puzzle = parsePuzzleRow(line)
     if (!puzzle) continue // header row or malformed
     fallback = puzzle
-    if (filters.minRating != null && puzzle.rating < filters.minRating) continue
-    if (filters.maxRating != null && puzzle.rating > filters.maxRating) continue
-    if (filters.minPopularity != null && puzzle.popularity < filters.minPopularity) continue
-    if (filters.maxPopularity != null && puzzle.popularity > filters.maxPopularity) continue
-    if (wanted && !puzzle.themes.some(t => wanted.has(t))) continue
-    return puzzle
+    if (puzzleMatchesFilters(puzzle, filters)) return puzzle
   }
-  return fallback // filters too tight — still return a puzzle rather than nothing
+  if (!queryHasPuzzleFilters(filters)) return fallback
+  const scanned = await scanPuzzleFromRandomOffset(filters)
+  // When even the scan finds nothing, return the non-matching fallback: the
+  // client re-checks filters itself and reports "no puzzles match" rather than
+  // mistaking an empty response for a source outage.
+  return scanned || fallback
 }
 
 // # Plugin Entry Point

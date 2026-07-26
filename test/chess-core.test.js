@@ -11,7 +11,11 @@ import {
   mergeItemTextIntoChessObj,
   formatPlayerId,
   parsePlayerId,
+  isManuallyEditablePlayerTag,
+  boardPlayerLabelFromPgn,
   playerDisplayLabelHtml,
+  formatPlayerDisplayLabel,
+  faviconUrl,
   openChallengeAcceptParagraph,
   wikiSiteLinkLabel,
   wikiSitePageUrl,
@@ -29,6 +33,9 @@ import {
   keepGhostUntilSeatsFilled,
   claimSeat,
   getSeatClaimOffer,
+  upgradeGuestSeatTagsToWikiIdentity,
+  isPlainGuestSeatTag,
+  GUEST_PLAYER_NAME,
   detectClipboardChessFormat,
   isPasteActionable,
   isPasteContentValid,
@@ -101,6 +108,11 @@ import {
   puzzleBankBodyText,
   parsePuzzleSpec,
   recordAdaptivePuzzleOutcome,
+  ADAPTIVE_COACH_DEFAULT_RATING,
+  markPuzzleItemProgress,
+  puzzleItemProgressFromText,
+  academyProgressFromLocalPages,
+  resolveSmartAcademyNext,
   academyLinksForPuzzleThemes,
   shouldSplitOpenSeatGameJournal,
   chessGameHasStarted,
@@ -120,6 +132,8 @@ import {
   siteGameSettingDefaults,
   pgnGameSettingDefaults,
   parseCommentsTag,
+  parseOnOffPgnTag,
+  isDemoOrLessonGame,
   pgnHasMoveComments,
   shouldViewLoadedGameFromStart,
   isAnnotatedGameChessText,
@@ -157,9 +171,6 @@ import {
   parsePuzzleBankContent,
   parsePuzzleJsonLine,
   looksLikePuzzleBankPaste,
-  recordTrainingCompletion,
-  hasTrainingCompletion,
-  recommendTagsFromTrainingLog,
   isLoopbackWikiHost,
   protocolForWikiSite,
   puzzlePlayerColor,
@@ -276,6 +287,15 @@ describe('lib · chess-core', () => {
     assert.equal(parsePlayerId('Stockfish Level 3').isEngine, true)
   })
 
+  it('marks plain seat names as manually editable (not Stockfish or wiki host seats)', () => {
+    assert.equal(isManuallyEditablePlayerTag('Olga'), true)
+    assert.equal(isManuallyEditablePlayerTag('Player 2'), true)
+    assert.equal(isManuallyEditablePlayerTag('Guest'), true)
+    assert.equal(isManuallyEditablePlayerTag('Stockfish Level 3'), false)
+    assert.equal(isManuallyEditablePlayerTag('localhost:3001 (Rob)'), false)
+    assert.equal(isManuallyEditablePlayerTag(''), false)
+  })
+
   it('keeps Stockfish Elo out of board names (badge shows it separately)', () => {
     assert.equal(boardPlayerLabel({ name: 'Stockfish Level 3', state: { level: 3 } }), 'Stockfish Level 3')
     assert.equal(boardPlayerLabel({ name: 'Stockfish Level 6' }), 'Stockfish Level 6')
@@ -292,10 +312,43 @@ describe('lib · chess-core', () => {
     assert.equal(wikiSitePageUrl('example.com'), 'https://example.com/welcome-visitors.html')
     const html = playerDisplayLabelHtml('ff.localhost:3001 (Rob)')
     assert.match(html, /href="http:\/\/ff\.localhost:3001\/welcome-visitors\.html"/)
+    assert.match(html, /Rob/)
     assert.match(html, />ff\.localhost:3001</)
-    assert.match(html, />\s*\(Rob\)/)
     assert.match(playerDisplayLabelHtml('example.com (Ada)'), /href="https:\/\/example\.com\/welcome-visitors\.html"/)
+    assert.match(playerDisplayLabelHtml('example.com (Ada)'), /Ada/)
     assert.match(playerDisplayLabelHtml('example.com (Ada)'), />example\.com</)
+    assert.equal(formatPlayerDisplayLabel('chess.aolc.cc (Wiki Cafe)'), 'Wiki Cafe (chess.aolc.cc)')
+  })
+
+  it('keeps host-first wiki tags for board bars so favicons resolve', () => {
+    // Display labels are name-first; parsePlayerId / faviconUrl need host-first PGN tags.
+    const white = { name: 'stale' }
+    const black = { name: 'Stockfish Level 1', state: { level: 1 } }
+    const consoleLike = {
+      playerWhite: () => white,
+      playerBlack: () => black,
+      state: {
+        chess: {
+          pgn: {
+            header: {
+              tags: {
+                White: 'chess.aolc.cc (Wiki Cafe)',
+                Black: 'Stockfish Level 1',
+              },
+            },
+          },
+        },
+      },
+    }
+    const label = boardPlayerLabelFromPgn(white, consoleLike)
+    assert.equal(label, 'chess.aolc.cc (Wiki Cafe)')
+    const parsed = parsePlayerId(label)
+    assert.equal(parsed.domain, 'chess.aolc.cc')
+    assert.equal(parsed.username, 'Wiki Cafe')
+    assert.match(faviconUrl(parsed.domain), /chess\.aolc\.cc\/favicon\.png/)
+    // Regressing to formatPlayerDisplayLabel here swaps host/name and breaks the chip.
+    const wrong = parsePlayerId(formatPlayerDisplayLabel(label))
+    assert.notEqual(wrong.domain, 'chess.aolc.cc')
   })
 
   it('names joiner and creator in the open-challenge accept paragraph', () => {
@@ -393,6 +446,17 @@ describe('lib · chess-core', () => {
     const pgn = buildStartPgn({ gameType: 'open', ownerName: 'alice', wikiSite: 'ff.localhost' })
     const claimed = claimSeat(pgn, 'Black', { ownerName: 'bob', wikiSite: 'bb.localhost' })
     assert.equal(getPgnTag(claimed, 'Black'), 'bb.localhost (bob)')
+  })
+
+  it('upgrades a plain Guest seat to the signed-in wiki identity', () => {
+    const pgn = `[White "${GUEST_PLAYER_NAME}"]\n[Black "Stockfish Level 3"]\n[Result "*"]\n\n*`
+    assert.equal(isPlainGuestSeatTag(GUEST_PLAYER_NAME), true)
+    const next = upgradeGuestSeatTagsToWikiIdentity(pgn, {
+      signedInDisplayName: 'Robert',
+      wikiSite: 'robert.localhost:3001',
+    })
+    assert.equal(getPgnTag(next, 'White'), 'robert.localhost:3001 (Robert)')
+    assert.equal(getPgnTag(next, 'Black'), 'Stockfish Level 3')
   })
 
   it('offers wiki join on open seats only when browsing a remote challenge', () => {
@@ -646,6 +710,11 @@ ${MATE_IN_1_ROW}`
     it('marks the puzzle failed on a wrong move', () => {
       const solver = createPuzzleSolver(parsePuzzleRow(MATE_IN_2_ROW)).start()
       assert.equal(solver.submitMove('c4c3').status, 'wrong')
+      const illegal = createPuzzleSolver(parsePuzzleRow(MATE_IN_2_ROW)).start()
+      const illegalResult = illegal.failIllegal()
+      assert.equal(illegalResult.status, 'wrong')
+      assert.equal(illegalResult.reason, 'illegal')
+      assert.equal(illegal.failIllegal().status, 'ignored')
       assert.equal(solver.failed, true)
     })
 
@@ -819,40 +888,70 @@ ${MATE_IN_1_ROW}`
       assert.equal(formatByteSize(302_000_000), '~302 MB')
     })
 
+    it('parses next=/done= and walks smart academy next from local page JSON', () => {
+      const spec = parsePuzzleSpec('next=how-the-queen-moves done=1')
+      assert.equal(spec.filters.next, 'how-the-queen-moves')
+      assert.equal(spec.filters.done, true)
+      const teach =
+        'PUZZLE next=how-the-queen-moves\n[Event "How the King Moves"]\n[FEN "4k3/8/8/8/8/8/8/4K3 w - - 0 1"]\n\n1. Ke2 *'
+      const marked = markPuzzleItemProgress(teach, { done: true })
+      assert.match(marked, /^PUZZLE done=1 next=how-the-queen-moves\n/)
+      assert.match(marked, /\[Event "How the King Moves"\]/)
+      assert.equal(puzzleItemProgressFromText(marked).done, true)
+
+      const progress = academyProgressFromLocalPages([
+        {
+          slug: 'how-the-king-moves',
+          title: 'How the King Moves',
+          story: [{ type: 'chess', text: marked }],
+        },
+        {
+          slug: 'how-the-queen-moves',
+          title: 'How the Queen Moves',
+          story: [{ type: 'chess', text: 'PUZZLE next=how-the-rook-moves\n[Event "Q"]\n1. Qd4 *' }],
+        },
+      ])
+      assert.equal(progress['how-the-king-moves'].done, true)
+      assert.equal(resolveSmartAcademyNext('how-the-king-moves', progress), 'how-the-queen-moves')
+      assert.equal(ADAPTIVE_COACH_DEFAULT_RATING.min, 400)
+    })
+
     it('parses and rewrites adaptive Puzzle Coach progress on the filter line', () => {
-      const spec = parsePuzzleSpec('adaptive=true rating=800..1200 solved=a1,a2 failed=b1\n{"id":"x"}')
+      const spec = parsePuzzleSpec('adaptive=true rating=400..700 solved=a1,a2 failed=b1\n{"id":"x"}')
       assert.equal(spec.adaptive, true)
       assert.equal(spec.filters.adaptive, true)
-      assert.equal(spec.filters.minRating, 800)
+      assert.equal(spec.filters.minRating, 400)
       assert.deepEqual(spec.filters.solvedIds, ['a1', 'a2'])
       assert.deepEqual(spec.filters.failedIds, ['b1'])
       assert.equal(hasActivePuzzleFilters(spec.filters), true)
 
       const item =
-        'PUZZLE adaptive=true rating=800..1200\n' +
-        '{"id":"p1","fen":"4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1","moves":["e2e8"],"themes":["mateIn1"],"rating":900}'
+        'PUZZLE adaptive=true rating=400..700\n' +
+        '{"id":"p1","fen":"4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1","moves":["e2e8"],"themes":["mateIn1"],"rating":500}'
       assert.match(puzzleBankBodyText(item), /^\{"id":"p1"/)
 
-      const next = recordAdaptivePuzzleOutcome({ adaptive: true, minRating: 800, maxRating: 1200 }, 'solved', 'p1')
+      const next = recordAdaptivePuzzleOutcome({ adaptive: true, minRating: 400, maxRating: 700 }, 'solved', 'p1')
       assert.deepEqual(next.solvedIds, ['p1'])
-      assert.equal(next.minRating, 850)
-      assert.equal(next.maxRating, 1250)
+      assert.equal(next.minRating, 450)
+      assert.equal(next.maxRating, 750)
       const rewritten = rewritePuzzleItemText(item, next)
-      assert.match(rewritten, /^PUZZLE adaptive=true rating=850\.\.1250 solved=p1\n/)
+      assert.match(rewritten, /^PUZZLE adaptive=true rating=450\.\.750 solved=p1\n/)
       assert.match(rewritten, /"id":"p1"/)
 
       const failed = recordAdaptivePuzzleOutcome(next, 'failed', 'p2')
       assert.deepEqual(failed.failedIds, ['p2'])
       assert.ok(!failed.solvedIds.includes('p2'))
-      assert.equal(failed.minRating, 800)
-      assert.equal(failed.maxRating, 1200)
+      assert.equal(failed.minRating, 400)
+      assert.equal(failed.maxRating, 700)
 
       assert.deepEqual(
-        academyLinksForPuzzleThemes(['pin', 'fork', 'opening']).map(l => l.title),
-        ['The Pin', 'The Fork'],
+        academyLinksForPuzzleThemes(['pin', 'fork', 'opening', 'pieceMove']).map(l => l.title),
+        ['The Pin', 'The Fork', 'How Pieces Move'],
       )
-      assert.match(buildPuzzleItemText({ adaptive: true, minRating: 900, maxRating: 1100 }), /adaptive=true/)
-      assert.equal(isEditableChessItemText('PUZZLE adaptive=true rating=800..1200'), true)
+      assert.match(buildPuzzleItemText({ adaptive: true, minRating: 400, maxRating: 700 }), /adaptive=true/)
+      assert.equal(isEditableChessItemText('PUZZLE adaptive=true rating=400..700'), true)
+      assert.equal(ADAPTIVE_COACH_DEFAULT_RATING.min, 400)
+      assert.equal(ADAPTIVE_COACH_DEFAULT_RATING.max, 700)
     })
 
     it('matches puzzles against pool filters including themes', () => {
@@ -955,21 +1054,6 @@ ${MATE_IN_1_ROW}`
       assert.equal(referenced[0].id, 'shared-fork')
       assert.equal(referenced[0].source, 'wiki-page')
       assert.equal(referenced[0].sourcePageSlug, 'the-fork')
-    })
-
-    it('records opt-in training log completions in storage', () => {
-      const store = new Map()
-      const storage = {
-        getItem: key => (store.has(key) ? store.get(key) : null),
-        setItem: (key, value) => store.set(key, String(value)),
-      }
-      const entry = recordTrainingCompletion(
-        { pageSlug: 'the-pin', itemId: 'abc', puzzleId: 'p1', tags: ['pin'] },
-        storage,
-      )
-      assert.equal(entry.pageSlug, 'the-pin')
-      assert.equal(hasTrainingCompletion({ pageSlug: 'the-pin', itemId: 'abc', puzzleId: 'p1' }, storage), true)
-      assert.deepEqual(recommendTagsFromTrainingLog(['pin', 'fork'], storage), ['fork'])
     })
   })
 
@@ -1209,6 +1293,9 @@ ${MATE_IN_1_ROW}`
       assert.equal(parseCommentsTag('[Comments "on"]\n\n1. e4 e5 *'), 'on')
       assert.equal(parseCommentsTag('[Comments "off"]\n\n1. e4 e5 *'), 'off')
       assert.equal(parseCommentsTag('[Event "x"]\n\n1. e4 e5 *'), null)
+      assert.equal(isDemoOrLessonGame('[Demo "1"]\n[Result "*"]\n\n1. e4 e5 *'), true)
+      assert.equal(isDemoOrLessonGame('[Lesson "1"]\n[Result "*"]\n\n1. e4 e5 *'), true)
+      assert.equal(isDemoOrLessonGame('[Result "*"]\n\n1. e4 e5 *'), false)
       assert.deepEqual(pgnGameSettingDefaults('[Comments "on"]\n\n1. e4 e5 *'), {
         enableComments: true,
         showAnnotationsBelow: true,
@@ -1218,6 +1305,35 @@ ${MATE_IN_1_ROW}`
         showAnnotationsBelow: false,
       })
       assert.deepEqual(pgnGameSettingDefaults('[Event "x"]\n\n1. e4 e5 *'), {})
+      assert.equal(parseOnOffPgnTag('[ConfirmMoves "on"]\n\n*', 'ConfirmMoves'), 'on')
+      assert.equal(parseOnOffPgnTag('[SameDeviceFlip "off"]\n\n*', 'SameDeviceFlip'), 'off')
+      assert.deepEqual(pgnGameSettingDefaults('[ConfirmMoves "on"]\n[SameDeviceFlip "on"]\n\n*'), {
+        confirmMoves: true,
+        sameDeviceFlip: true,
+      })
+      assert.deepEqual(pgnGameSettingDefaults('[SameDeviceFlipPieces "on"]\n\n*'), {
+        sameDeviceFlipPieces: true,
+      })
+      // Merge order: site < personal IndexedDB prefs < PGN tags (author wins).
+      assert.equal(
+        mergeGameSettings(
+          mergeGameSettings(siteGameSettingDefaults('chess-academy.localhost'), {
+            showAnnotationsBelow: false,
+            confirmMoves: false,
+          }),
+          pgnGameSettingDefaults('[Comments "on"]\n[ConfirmMoves "on"]'),
+        ).confirmMoves,
+        true,
+      )
+      assert.equal(
+        mergeGameSettings(
+          mergeGameSettings(siteGameSettingDefaults('chess-academy.localhost'), {
+            showAnnotationsBelow: false,
+          }),
+          pgnGameSettingDefaults('[Comments "off"]'),
+        ).showAnnotationsBelow,
+        false,
+      )
       assert.equal(
         mergeGameSettings(
           mergeGameSettings(
@@ -1904,6 +2020,8 @@ ${movetext}`.trim()
       assert.equal(MSG.CREATE_PREVIEW, 'create-preview')
       assert.equal(MSG.ABANDON_FETCHES, 'abandon-fetches')
       assert.equal(MSG.FETCH_UI, 'fetch-ui')
+      assert.equal(MSG.ALERT_UI, 'alert-ui')
+      assert.equal(MSG.SHOW_CRAWL_HITS_PAGE, 'show-crawl-hits-page')
       assert.equal(MSG.CREATE_PASTE_PREVIEW, 'create-paste-preview')
     })
   })

@@ -236,15 +236,22 @@ function resumeOneSuspended() {
 }
 
 function discardAllSuspended() {
+  // Nested confirm (e.g. Cancel challenge over edit) parks the outer shell's
+  // mountRestore on the stack. Discarding without running it leaves the wiki
+  // embed's page children at display:none — empty "My Chess Games" after cancel.
+  const mountRestores = []
   while (suspendedStack.length) {
     const entry = suspendedStack.pop()
     if (entry.kind === 'shell') {
+      if (typeof entry.mountRestore === 'function') mountRestores.push(entry.mountRestore)
       entry.root?.remove()
       entry.cleanup?.()
     } else if (entry.kind === 'bodyDialog') {
       entry.overlay?.discard?.()
     }
   }
+  // Outermost hideMountContent restore last (collected innermost-first while popping).
+  for (let i = mountRestores.length - 1; i >= 0; i -= 1) mountRestores[i]?.()
 }
 
 function removeActiveShellModal() {
@@ -274,7 +281,24 @@ export function clearViewportBlockingModals() {
   document.body?.classList.remove('wiki-modal-open')
 }
 
+function discardSuspendedBodyDialogs() {
+  if (!suspendedStack.length) return
+  const kept = []
+  while (suspendedStack.length) {
+    const entry = suspendedStack.pop()
+    if (entry.kind === 'bodyDialog') {
+      entry.overlay?.discard?.()
+    } else {
+      kept.push(entry)
+    }
+  }
+  while (kept.length) suspendedStack.push(kept.pop())
+}
+
 function closeModalDismiss(onDismiss) {
+  // Resign / confirm Cancel must not resurrect a parked start-game dialog — on mobile
+  // PWA that overlay can eat taps so Cancel looks like a no-op.
+  discardSuspendedBodyDialogs()
   closeActiveModal({ resumeSuspended: suspendedStack.length > 0 })
   onDismiss?.()
 }
@@ -326,6 +350,8 @@ function createModalShell({
   mount = document.body,
   embedded = false,
   boardOverlay = false,
+  dismissOnBackdrop = true,
+  dismissOnEscape = true,
   onDismiss = null,
   onEnter = null,
   onLayoutChange = null,
@@ -349,7 +375,7 @@ function createModalShell({
   if (embedded || hostContained) rootClasses.push('wiki-modal-embedded')
   if (boardOverlay) rootClasses.push('wiki-modal-board-overlay')
   root.className = rootClasses.join(' ')
-  root.innerHTML = `<div class="wiki-modal-backdrop" data-dismiss="true"></div>`
+  root.innerHTML = `<div class="wiki-modal-backdrop"${dismissOnBackdrop ? ' data-dismiss="true"' : ''}></div>`
 
   const panel = document.createElement('div')
   panel.className = 'wiki-modal-panel'
@@ -374,12 +400,14 @@ function createModalShell({
   beginPwaModalWindowForShell(panel, { embedded: embedded || hostContained, boardOverlay })
 
   const dismiss = () => closeModalDismiss(onDismiss)
-  root.addEventListener('click', event => {
-    if (event.target?.dataset?.dismiss === 'true') dismiss()
-  })
+  if (dismissOnBackdrop) {
+    root.addEventListener('click', event => {
+      if (event.target?.dataset?.dismiss === 'true') dismiss()
+    })
+  }
 
   const onKey = event => {
-    if (event.key === 'Escape') {
+    if (dismissOnEscape && event.key === 'Escape') {
       dismiss()
     } else if (onEnter && event.key === 'Enter') {
       event.preventDefault()
@@ -394,6 +422,50 @@ function createModalShell({
   // once it has populated the modal (so an embedded host iframe measures the real
   // height, not an empty shell).
   return { root, panel, body, footer }
+}
+
+// Blocking OK-only alert — used when a background Visible-federation crawl finishes.
+export function openAlertModal({
+  title = 'Notice',
+  message = '',
+  okLabel = 'OK',
+  mount = document.body,
+  embedded = false,
+  onOk,
+  onLayoutChange = null,
+} = {}) {
+  const finish = () => closeModalConfirm(onOk)
+  const { body, footer } = createModalShell({
+    ariaLabel: title,
+    mount,
+    embedded,
+    dismissOnBackdrop: false,
+    dismissOnEscape: false,
+    onEnter: finish,
+    onLayoutChange,
+  })
+
+  if (title) {
+    const heading = document.createElement('h2')
+    heading.className = 'h5 wiki-chess-gate-title'
+    heading.textContent = title
+    body.append(heading)
+  }
+  if (message) {
+    const lead = document.createElement('p')
+    lead.className = 'wiki-modal-message'
+    lead.textContent = message
+    body.append(lead)
+  }
+
+  const okBtn = document.createElement('button')
+  okBtn.type = 'button'
+  okBtn.className = 'btn btn-primary'
+  okBtn.textContent = okLabel
+  okBtn.addEventListener('click', finish)
+  footer.append(okBtn)
+  okBtn.focus({ preventScroll: true })
+  onLayoutChange?.()
 }
 
 // # Confirm and Paste Modals
@@ -792,6 +864,7 @@ export function openEndRealtimeModal({
 export function openChallengeEditModal({
   title = '',
   rated = false,
+  allowGuests = true,
   creatorColor = 'random',
   minRating = null,
   maxRating = null,
@@ -806,9 +879,11 @@ export function openChallengeEditModal({
   onLayoutChange,
 } = {}) {
   const submit = () => {
+    const isRated = ratedSelect.value === 'rated'
     closeModalConfirm(() =>
       onSave?.({
-        rated: ratedSelect.value === 'rated',
+        rated: isRated,
+        allowGuests: isRated ? false : allowGuestsCheck.checked,
         creatorColor: colorSelect.value || 'random',
         minRating: minInput.value ?? '',
         maxRating: maxInput.value ?? '',
@@ -886,12 +961,32 @@ export function openChallengeEditModal({
   ratingRow.className = 'wiki-challenge-edit-rating-row'
   ratingRow.append(makeField('Min rating', minInput), makeField('Max rating', maxInput))
 
+  const allowGuestsWrap = document.createElement('label')
+  allowGuestsWrap.className = 'wiki-modal-seek-open-page'
+  const allowGuestsCheck = document.createElement('input')
+  allowGuestsCheck.type = 'checkbox'
+  allowGuestsCheck.checked = !rated && allowGuests !== false
+  allowGuestsWrap.append(allowGuestsCheck, document.createTextNode(' Allow unauthenticated guests to join'))
+  const syncAllowGuestsUi = () => {
+    const isRated = ratedSelect.value === 'rated'
+    allowGuestsCheck.disabled = isRated
+    if (isRated) allowGuestsCheck.checked = false
+  }
+  ratedSelect.addEventListener('change', syncAllowGuestsUi)
+  syncAllowGuestsUi()
+
   const hint = document.createElement('p')
   hint.className = 'wiki-modal-offline'
   hint.textContent =
-    'Leave a rating blank for no limit. Opponents outside the range can view the game but can\u2019t join.'
+    'Leave a rating blank for no limit. Rated challenges are wiki-owners only. Unchecking guests hides the seek from anonymous visitors.'
 
-  body.append(makeField('Game format', ratedSelect), makeField('Your color', colorSelect), ratingRow, hint)
+  body.append(
+    makeField('Game format', ratedSelect),
+    makeField('Your color', colorSelect),
+    ratingRow,
+    allowGuestsWrap,
+    hint,
+  )
 
   const cancelBtn = document.createElement('button')
   cancelBtn.type = 'button'

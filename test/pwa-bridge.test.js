@@ -23,6 +23,7 @@ import {
 } from '../src/federation.js'
 import {
   SURVEY_PAGE_STORY,
+  SURVEY_PAGE_TITLE,
   isSurveyItemText,
   pageSlug,
   LEADERBOARD_PAGE_SLUG,
@@ -190,6 +191,38 @@ describe('server · pwa-bridge', () => {
     assert.equal(updated.openChallenges[0].challenge.creator.host, undefined)
   })
 
+  it('stores page-backed open challenges with a game slug on the SURVEY item', () => {
+    const surveyItem = SURVEY_PAGE_STORY.find(i => i.type === 'chess')
+    const page = {
+      title: 'My Chess Games',
+      story: [{ ...surveyItem }],
+      journal: [
+        {
+          type: 'create',
+          item: { title: 'My Chess Games', story: [{ ...surveyItem }] },
+          date: 1,
+        },
+      ],
+    }
+    const result = syncOpenChallengeSurveyOnPage(page, {
+      add: {
+        itemId: 'page-item',
+        slug: 'welcome-visitors',
+        pgn: '[White "host (You)"]\n[Black "?"]\n\n*',
+        title: 'Welcome Visitors',
+        challenge: {
+          status: 'open',
+          config: { rated: false, creatorColor: 'random' },
+          creator: { id: 'host (You)', host: 'localhost' },
+        },
+      },
+    })
+    assert.equal(result.changed, true)
+    const updated = page.story.find(i => isSurveyItemText(i.text))
+    assert.equal(updated.openChallenges[0].slug, 'welcome-visitors')
+    assert.equal(updated.openChallenges[0].itemId, 'page-item')
+  })
+
   it('builds a join-challenge page with seated PGN', () => {
     const payload = buildJoinChallengePage({
       ghostPgn: '[Event "Open — Alice"]\n[White "remote (Alice)"]\n[Black "?"]\n[Result "*"]\n\n*',
@@ -203,6 +236,7 @@ describe('server · pwa-bridge', () => {
       joinerSite: 'local.test',
       creatorSite: 'remote.test',
       ownerName: 'Bob',
+      isAuthenticatedOwner: true,
     })
     const { page } = materializeJoinChallengePage(payload, {
       slug: 'open-alice-vs-bob',
@@ -213,7 +247,28 @@ describe('server · pwa-bridge', () => {
     assert.match(chess.text, /local\.test \(Bob\)/)
     assert.equal(chess.challenge?.status, 'active')
     const para = page.story.find(i => i.type === 'paragraph')
-    assert.equal(para?.text, 'local.test (Bob) accepts an open challenge from remote (Alice).')
+    assert.equal(para?.text, 'Bob (local.test) accepts an open challenge from Alice (remote).')
+  })
+
+  it('seats an unauthenticated joiner as plain Guest, not the public site owner', () => {
+    const payload = buildJoinChallengePage({
+      ghostPgn: '[White "remote (Alice)"]\n[Black ""]\n[Result "*"]\n\n*',
+      challenge: {
+        status: 'open',
+        config: { rated: false, creatorColor: 'w', allowGuests: true },
+        creator: { id: 'remote (Alice)', site: 'remote.test' },
+      },
+      itemId: 'ghost-guest',
+      joinerDisplayName: '',
+      joinerSite: 'chess.aolc.cc',
+      creatorSite: 'remote.test',
+      ownerName: 'Wiki Cafe Owner',
+      isAuthenticatedOwner: false,
+      guestName: 'Guest',
+    })
+    assert.match(payload.seatedPgn, /\[Black "Guest"\]/)
+    assert.doesNotMatch(payload.seatedPgn, /Wiki Cafe Owner/)
+    assert.doesNotMatch(payload.seatedPgn, /chess\.aolc\.cc \(Guest\)/)
   })
 
   it('materializes a join-challenge page with a caller-supplied title', () => {
@@ -229,6 +284,7 @@ describe('server · pwa-bridge', () => {
       joinerSite: 'local.test',
       creatorSite: 'remote.test',
       ownerName: 'Bob',
+      isAuthenticatedOwner: true,
     })
     const customTitle = 'My Custom Game Title'
     const { page } = materializeJoinChallengePage(payload, {
@@ -252,6 +308,7 @@ describe('server · pwa-bridge', () => {
       joinerSite: 'local.test',
       creatorSite: 'remote.test',
       ownerName: 'Bob',
+      isAuthenticatedOwner: true,
       remoteTitle: 'Alice vs [open-seat]',
     })
     // Random seat hash may put the joiner on White — title follows White vs Black.
@@ -342,16 +399,17 @@ describe('server · pwa-bridge', () => {
 1. e4`
     const site = {
       async getPage(host, slug) {
-        if (slug === 'system/sitemap.json') {
-          return [
-            { slug: 'my-chess-games', date: 2 },
-            { slug: 'test-game', date: 1 },
-          ]
-        }
         if (slug === 'my-chess-games.json') {
           return {
-            title: 'My Chess Games',
-            story: [{ type: 'chess', id: 'survey1', text: 'SURVEY' }],
+            title: SURVEY_PAGE_TITLE,
+            story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+            chess: {
+              gameIndex: {
+                completed: [{ host, slug: 'test-game', itemId: 'game1' }],
+                active: [],
+                challenges: [],
+              },
+            },
           }
         }
         if (slug === 'test-game.json') {
@@ -437,17 +495,18 @@ describe('server · pwa-bridge', () => {
 
 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7`
     const site = {
-      async getPage(_host, slug) {
-        if (slug === 'system/sitemap.json') {
-          return [
-            { slug: 'my-chess-games', date: 2 },
-            { slug: 'rated-game', date: 1 },
-          ]
-        }
+      async getPage(host, slug) {
         if (slug === 'my-chess-games.json') {
           return {
-            title: 'My Chess Games',
-            story: [{ type: 'chess', id: 'survey1', text: 'SURVEY' }],
+            title: SURVEY_PAGE_TITLE,
+            story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+            chess: {
+              gameIndex: {
+                completed: [{ host, slug: 'rated-game', itemId: 'game1' }],
+                active: [],
+                challenges: [],
+              },
+            },
           }
         }
         if (slug === 'rated-game.json') {
@@ -479,16 +538,17 @@ describe('server · pwa-bridge', () => {
     const site = {
       async getPage(host, slug) {
         touched.push(`${host}/${slug}`)
-        if (slug === 'system/sitemap.json') {
-          return [
-            { slug: 'my-chess-games', date: 2 },
-            { slug: 'rated-game', date: 1 },
-          ]
-        }
         if (slug === 'my-chess-games.json') {
           return {
-            title: 'My Chess Games',
-            story: [{ type: 'chess', id: 'survey1', text: 'SURVEY' }],
+            title: SURVEY_PAGE_TITLE,
+            story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+            chess: {
+              gameIndex: {
+                completed: [{ host, slug: 'rated-game', itemId: 'game1' }],
+                active: [],
+                challenges: [],
+              },
+            },
           }
         }
         if (slug === 'rated-game.json') {
@@ -593,6 +653,18 @@ describe('server · pwa-bridge', () => {
     assert.ok(icons.every(icon => !icon.src.includes('/favicon.png')))
   })
 
+  it('leads with a large wiki flag in the install manifest', () => {
+    const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client')
+    const statusDir = path.join(clientDir, '.test-status-icons')
+    fs.mkdirSync(statusDir, { recursive: true })
+    const favPath = path.join(statusDir, 'favicon.png')
+    fs.copyFileSync(path.join(clientDir, 'icon-512.png'), favPath)
+    const icons = chessInstallManifestIcons('/plugins/chess/', { faviconPath: favPath })
+    assert.ok(icons[0].src.includes('/favicon.png'))
+    assert.equal(icons[0].sizes, '512x512')
+    fs.rmSync(statusDir, { recursive: true, force: true })
+  })
+
   it('wikiFaviconRevision tracks favicon mtime for cache busting', () => {
     const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client')
     const statusDir = path.join(clientDir, '.test-status-rev')
@@ -621,12 +693,16 @@ describe('server · pwa-bridge', () => {
     const island = { id: 'isle-1' }
     const knownOpponents = ['friend.localhost']
     const knownFederationSites = { hosts: ['peer.example'], updatedAt: 9 }
+    const siteCrawlCache = {
+      'peer.example': { updatedAt: 9, sitemap: [{ slug: 'g', date: 1 }], games: [] },
+    }
     const opts = federationIndexedDbOptsFromPayload({
       blockList,
       deletionMetrics,
       island,
       knownOpponents,
       knownFederationSites,
+      siteCrawlCache,
       localCheckpoint: { state_hash: 'ignore-me' },
     })
     assert.deepEqual(opts, {
@@ -635,6 +711,7 @@ describe('server · pwa-bridge', () => {
       island,
       knownOpponents,
       knownFederationSites,
+      siteCrawlCache,
     })
     assert.deepEqual(federationIndexedDbOptsFromPayload({}), {
       blockList: undefined,
@@ -642,6 +719,7 @@ describe('server · pwa-bridge', () => {
       island: undefined,
       knownOpponents: undefined,
       knownFederationSites: undefined,
+      siteCrawlCache: undefined,
     })
   })
 })

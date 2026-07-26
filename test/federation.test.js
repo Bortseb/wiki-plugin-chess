@@ -10,6 +10,9 @@ import {
   auditTwins,
   buildOpenChallenge,
   challengeRatingGate,
+  challengeJoinGate,
+  challengeVisibleToViewer,
+  resolveJoinerSeatId,
   shouldDismissChallengeJoinGhostForPwa,
   shouldShowChallengeJoinGhostForkBanner,
   shouldShowOpenChallengeBanner,
@@ -23,6 +26,7 @@ import {
   collectLineupPageSlugs,
   isGhostProposedTitle,
   isReplaceableGhostPageTitle,
+  resolveStartModalPageTitle,
   buildChallengeJoinGhostPgn,
   acceptOpenChallenge,
   reconstructGhostPgnFromSeated,
@@ -36,6 +40,9 @@ import {
   harvestGhostOpenChallenge,
   harvestPageOpenChallenge,
   harvestSurveyOpenChallenges,
+  openChallengeSurveyRecord,
+  openChallengeUsesJoinGhost,
+  isOpenChallengeCreatePreviewContext,
   chessChallengesFromPage,
   foreignOpenChallengeItemIds,
   applyOpenChallengeSurveyEdit,
@@ -54,6 +61,7 @@ import {
   fetchChessPluginIndexSites,
   resetChessPluginIndexCacheForTests,
   resolveFetchSeeds,
+  resolveFederationIndexLeafHosts,
   CHESS_PLUGIN_INDEX_TTL_MS,
   refreshFederationSitesFromIndex,
   LEADERBOARD_PAGE_STORY,
@@ -82,6 +90,7 @@ import {
   CHALLENGE_REJECT_BELOW_MIN,
   CHALLENGE_REJECT_ABOVE_MAX,
   CHALLENGE_REJECT_UNKNOWN_RATING,
+  CHALLENGE_REJECT_OWNERS_ONLY,
   probeWikiSite,
   wikiSiteValidationErrorMessage,
   protocolForSite,
@@ -94,6 +103,9 @@ import {
   shouldCloseGlickoBatch,
   filterOpenChallengesByBlockList,
   applyDeletionRatioMetrics,
+  computeIslandState,
+  shouldShowIslandNotice,
+  ISLAND_CONTRACTION_RATIO,
   readGameTimelineKey,
   GLICKO_BATCH_GAME_LIMIT,
   stampCompletionTags,
@@ -112,11 +124,22 @@ import {
   mapWithConcurrency,
   fetchSiteGamePagesAsync,
   fetchFederationGamesAsync,
+  collectSiteGamesAsync,
   fetchChallengesAsync,
   mergeFederationSitesCache,
   normalizeFederationSitesCache,
   FEDERATION_SITES_CACHE_TTL_MS,
   SITE_FETCH_CONCURRENCY,
+  HOST_FETCH_CONCURRENCY,
+  sitemapSnapshotForCrawl,
+  diffSitemapSnapshots,
+  formatCrawlEtaLabel,
+  estimateCrawlEtaSeconds,
+  pruneSiteCrawlCache,
+  normalizeSiteCrawlCache,
+  buildCrawlHits,
+  crawlHitSiteReferences,
+  crawlHitGameReferences,
   orchestrateSiteSurveyDeferredWork,
   hopTrustAt,
   previewHopTrustSchedule,
@@ -147,6 +170,73 @@ const TWIN_PGN = `[White "alice.localhost (Alice)"]
 1. e4 e5 2. Nf3 Nc6 *`
 
 describe('lib · federation', () => {
+  describe('crawl hits for Last crawl ghost pages', () => {
+    it('lists only games from crawled hosts and builds site/game references', () => {
+      const cache = {
+        'alice.localhost': {
+          host: 'alice.localhost',
+          updatedAt: 1,
+          sitemap: [{ slug: 'game-one', date: 1 }],
+          games: [
+            {
+              slug: 'game-one',
+              title: 'Game One',
+              pgn: '[White "Alice"]\n[Black "Bob"]\n[Result "1-0"]\n\n1. e4 *',
+              host: 'alice.localhost',
+            },
+          ],
+        },
+        'bob.localhost': {
+          host: 'bob.localhost',
+          updatedAt: 1,
+          sitemap: [{ slug: 'other-game', date: 1 }],
+          games: [
+            {
+              slug: 'other-game',
+              title: 'Other Game',
+              pgn: '[White "Carol"]\n[Black "Dave"]\n\n1. d4 *',
+              host: 'bob.localhost',
+            },
+          ],
+        },
+      }
+      const hits = buildCrawlHits({
+        sites: ['alice.localhost'],
+        cacheHitSites: ['alice.localhost', 'carol.localhost'],
+        siteCrawlCache: cache,
+      })
+      assert.deepEqual(hits.sites, ['alice.localhost'])
+      assert.deepEqual(hits.cacheHitSites, ['alice.localhost'])
+      assert.equal(hits.games.length, 1)
+      assert.equal(hits.games[0].slug, 'game-one')
+      assert.match(hits.games[0].text, /Alice vs Bob/)
+
+      const siteRefs = crawlHitSiteReferences(hits.sites)
+      assert.equal(siteRefs[0].slug, 'welcome-visitors')
+      assert.equal(siteRefs[0].site, 'alice.localhost')
+
+      const gameRefs = crawlHitGameReferences(hits.games)
+      assert.equal(gameRefs[0].title, 'Game One')
+      assert.equal(gameRefs[0].site, 'alice.localhost')
+    })
+
+    it('returns empty games when no crawled sites are supplied', () => {
+      const hits = buildCrawlHits({
+        sites: [],
+        siteCrawlCache: {
+          'alice.localhost': {
+            host: 'alice.localhost',
+            updatedAt: 1,
+            sitemap: [],
+            games: [{ slug: 'x', title: 'X', pgn: '1. e4 *', host: 'alice.localhost' }],
+          },
+        },
+      })
+      assert.deepEqual(hits.sites, [])
+      assert.deepEqual(hits.games, [])
+    })
+  })
+
   describe('federated leaderboard filters', () => {
     const board = [
       { rank: 1, site: 'alice.localhost', rating: 1600 },
@@ -466,13 +556,35 @@ describe('lib · federation', () => {
       assert.deepEqual(page.chess?.federation?.trustedPeers, ['alice.localhost:3001'])
     })
 
-    it('normalizeChessCharmPatch drops legacy gameIndex from patches', () => {
+    it('normalizeChessCharmPatch keeps gameIndex catalog patches', () => {
       const patch = normalizeChessCharmPatch({
         gameIndex: { active: [{ host: 'a.localhost', slug: 'g1', itemId: 'c1' }], challenges: [], completed: [] },
         federation: { trustedPeers: ['bob.localhost'] },
       })
-      assert.equal(patch.gameIndex, undefined)
+      assert.equal(patch.gameIndex?.active?.length, 1)
+      assert.equal(patch.gameIndex.active[0].slug, 'g1')
       assert.deepEqual(patch.federation?.trustedPeers, ['bob.localhost'])
+    })
+
+    it('reviseChessCharmOnPage persists survey gameIndex without journal noise', () => {
+      const page = {
+        title: SURVEY_PAGE_TITLE,
+        story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
+        journal: [],
+      }
+      assert.equal(
+        reviseChessCharmOnPage(page, {
+          gameIndex: {
+            completed: [{ host: 'a.localhost', slug: 'g1', itemId: 'c1', gameHash: 'abc', rated: true }],
+            active: [],
+            challenges: [],
+          },
+        }),
+        true,
+      )
+      assert.equal(page.journal.length, 0)
+      assert.equal(page.chess?.gameIndex?.completed?.[0]?.slug, 'g1')
+      assert.equal(page.chess.gameIndex.completed[0].gameHash, 'abc')
     })
   })
 
@@ -896,6 +1008,89 @@ describe('lib · federation', () => {
 
     it('rejects viewers with unknown ratings when bounds are set', () => {
       assert.equal(challengeRatingGate(challenge, null).reason, CHALLENGE_REJECT_UNKNOWN_RATING)
+    })
+  })
+
+  describe('challenge join auth gate', () => {
+    it('blocks guests from rated seeks and hides them from anonymous browsers', () => {
+      const rated = buildOpenChallenge({
+        rated: true,
+        creatorId: 'alice.localhost (Alice)',
+        creatorSite: 'alice.localhost',
+      })
+      assert.equal(rated.config.allowGuests, false)
+      assert.equal(
+        challengeJoinGate(rated, { viewerRating: 1500, isAuthenticatedOwner: false }).reason,
+        CHALLENGE_REJECT_OWNERS_ONLY,
+      )
+      assert.equal(challengeVisibleToViewer(rated, { isAuthenticatedOwner: false }), false)
+      assert.equal(challengeVisibleToViewer(rated, { isAuthenticatedOwner: true }), true)
+      assert.deepEqual(challengeJoinGate(rated, { viewerRating: 1500, isAuthenticatedOwner: true }), {
+        ok: true,
+        reason: null,
+      })
+    })
+
+    it('hides casual owners-only seeks from guests but keeps guest-open seeks visible', () => {
+      const ownersOnly = buildOpenChallenge({
+        rated: false,
+        allowGuests: false,
+        creatorId: 'alice.localhost (Alice)',
+        creatorSite: 'alice.localhost',
+      })
+      const openToGuests = buildOpenChallenge({
+        rated: false,
+        allowGuests: true,
+        creatorId: 'alice.localhost (Alice)',
+        creatorSite: 'alice.localhost',
+      })
+      assert.equal(challengeVisibleToViewer(ownersOnly, { isAuthenticatedOwner: false }), false)
+      assert.equal(challengeVisibleToViewer(openToGuests, { isAuthenticatedOwner: false }), true)
+      assert.equal(
+        challengeJoinGate(ownersOnly, { isAuthenticatedOwner: false }).reason,
+        CHALLENGE_REJECT_OWNERS_ONLY,
+      )
+      assert.deepEqual(challengeJoinGate(openToGuests, { isAuthenticatedOwner: false }), {
+        ok: true,
+        reason: null,
+      })
+    })
+
+    it('stamps AllowGuests on casual seeks and omits it for rated', () => {
+      const casual = buildOpenChallenge({
+        rated: false,
+        allowGuests: false,
+        creatorId: 'alice.localhost (Alice)',
+        creatorSite: 'alice.localhost',
+      })
+      const rated = buildOpenChallenge({
+        rated: true,
+        creatorId: 'alice.localhost (Alice)',
+        creatorSite: 'alice.localhost',
+      })
+      const casualPgn = stampOpenChallengePgn('[White "alice.localhost (Alice)"]\n[Black ""]\n*', casual)
+      const ratedPgn = stampOpenChallengePgn('[White "alice.localhost (Alice)"]\n[Black ""]\n*', rated)
+      assert.match(casualPgn, /\[AllowGuests "no"\]/)
+      assert.doesNotMatch(ratedPgn, /AllowGuests/)
+      assert.equal(openChallengeFromPgn(casualPgn).config.allowGuests, false)
+    })
+
+    it('never wraps an unauthenticated joiner with the public site owner name', () => {
+      assert.equal(
+        resolveJoinerSeatId('', 'chess.aolc.cc', 'Wiki Cafe Owner', {
+          isAuthenticatedOwner: false,
+          guestName: 'Guest',
+        }),
+        'Guest',
+      )
+      assert.equal(
+        resolveJoinerSeatId('Guest', 'chess.aolc.cc', 'Wiki Cafe Owner', { isAuthenticatedOwner: false }),
+        'Guest',
+      )
+      assert.equal(
+        resolveJoinerSeatId('', 'local.test', 'Bob', { isAuthenticatedOwner: true }),
+        'local.test (Bob)',
+      )
     })
   })
 
@@ -1425,7 +1620,53 @@ describe('lib · federation', () => {
       assert.equal(isReplaceableGhostPageTitle('Frank vs [open-seat]'), true)
       assert.equal(isReplaceableGhostPageTitle('Play Black vs Frank'), true)
       assert.equal(isReplaceableGhostPageTitle('Play Random vs Frank'), true)
+      assert.equal(isReplaceableGhostPageTitle('Frank vs Stockfish Level 1'), true)
+      assert.equal(isReplaceableGhostPageTitle('Stockfish Level 3 vs Frank'), true)
+      assert.equal(isReplaceableGhostPageTitle('Player 1 vs Player 2'), true)
       assert.equal(isReplaceableGhostPageTitle('Spring Open R3: Alice vs Bob'), false)
+    })
+  })
+
+  describe('resolveStartModalPageTitle', () => {
+    it('refreshes stale open-seek titles when switching to an engine proposal', () => {
+      assert.equal(
+        resolveStartModalPageTitle({
+          proposed: 'Wiki vs Stockfish Level 1',
+          fieldTitle: 'Play Random vs Wiki',
+        }),
+        'Wiki vs Stockfish Level 1',
+      )
+    })
+
+    it('refreshes replaceable auto-titles even if the field was marked dirty', () => {
+      assert.equal(
+        resolveStartModalPageTitle({
+          proposed: 'Wiki vs Stockfish Level 1',
+          fieldTitle: 'Play Random vs Wiki',
+          dirty: true,
+        }),
+        'Wiki vs Stockfish Level 1',
+      )
+    })
+
+    it('keeps a custom non-replaceable title', () => {
+      assert.equal(
+        resolveStartModalPageTitle({
+          proposed: 'Wiki vs Stockfish Level 1',
+          fieldTitle: 'Spring Open R3: Alice vs Bob',
+        }),
+        'Spring Open R3: Alice vs Bob',
+      )
+    })
+
+    it('uses the proposal when the field is empty', () => {
+      assert.equal(
+        resolveStartModalPageTitle({
+          proposed: 'Wiki vs Stockfish Level 1',
+          fieldTitle: '',
+        }),
+        'Wiki vs Stockfish Level 1',
+      )
     })
   })
 
@@ -1523,18 +1764,32 @@ describe('lib · federation', () => {
     it('harvests a pending ghost chess item', () => {
       const entry = harvestGhostOpenChallenge({
         host: 'frank.localhost',
-        slug: 'my-chess-games',
         title: 'Frank vs Open',
         itemId: 'abc123',
         pgn,
         challenge,
       })
       assert.equal(entry?.pending, true)
+      assert.equal(entry?.slug, '')
       assert.equal(entry?.site, 'frank.localhost')
       assert.equal(entry?.host, undefined)
       assert.equal(entry?.challenge?.creator?.site, 'frank.localhost')
       assert.equal(entry?.pgn, pgn)
       assert.equal(entry?.itemId, 'abc123')
+    })
+
+    it('harvests a page-backed survey seek when a game slug is present', () => {
+      const entry = harvestGhostOpenChallenge({
+        host: 'frank.localhost',
+        slug: 'club-night',
+        title: 'Club Night',
+        itemId: 'item42',
+        pgn,
+        challenge,
+      })
+      assert.equal(entry?.pending, false)
+      assert.equal(entry?.slug, 'club-night')
+      assert.equal(entry?.itemId, 'item42')
     })
 
     it('rejects ghost entries missing embedded PGN', () => {
@@ -1630,6 +1885,40 @@ describe('lib · federation', () => {
       assert.equal(entries.length, 1)
       assert.equal(entries[0]?.itemId, 'abc123')
       assert.equal(entries[0]?.pending, true)
+    })
+
+    it('stores a page-backed survey record with slug (pending false when harvested)', () => {
+      const record = openChallengeSurveyRecord(challenge, {
+        itemId: 'item42',
+        pgn,
+        title: 'Club Night',
+        slug: 'club-night',
+      })
+      assert.equal(record?.slug, 'club-night')
+      assert.equal(record?.itemId, 'item42')
+      const updated = applyOpenChallengeSurveyEdit(surveyItem, { add: { ...record, challenge } })
+      const entries = harvestSurveyOpenChallenges(
+        { story: [updated] },
+        'frank.localhost',
+        'my-chess-games',
+      )
+      assert.equal(entries.length, 1)
+      assert.equal(entries[0]?.pending, false)
+      assert.equal(entries[0]?.slug, 'club-night')
+      assert.equal(openChallengeUsesJoinGhost(entries[0]), false)
+    })
+
+    it('uses a join ghost only for pending survey-metadata seeks', () => {
+      assert.equal(openChallengeUsesJoinGhost({ pending: true, pgn }), true)
+      assert.equal(openChallengeUsesJoinGhost({ pending: false, slug: 'club-night', pgn }), false)
+      assert.equal(openChallengeUsesJoinGhost({ accepted: true, acceptedGame: { slug: 'done' } }), false)
+    })
+
+    it('treats only create-preview flags as open-challenge ghost context', () => {
+      assert.equal(isOpenChallengeCreatePreviewContext({}), false)
+      assert.equal(isOpenChallengeCreatePreviewContext({ createPreviewPendingJournal: true }), true)
+      assert.equal(isOpenChallengeCreatePreviewContext({ openChallengeSetupPending: true }), true)
+      assert.equal(isOpenChallengeCreatePreviewContext({ wikiGhostPage: true }), true)
     })
 
     it('ignores open challenges forked onto another wiki', () => {
@@ -1828,7 +2117,7 @@ describe('lib · federation', () => {
       assert.equal(elifView.acceptedMine[0].accepted, true)
       assert.equal(elifView.acceptedMine[0].acceptedGame.slug, 'elif-vs-frank')
       assert.equal(elifView.acceptedMine[0].acceptedGame.site, 'frank.localhost')
-      assert.equal(elifView.acceptedMine[0].opponentLabel, 'frank.localhost (Frank)')
+      assert.equal(elifView.acceptedMine[0].opponentLabel, 'Frank (frank.localhost)')
     })
 
     it('ignores stale forked creator seek metadata on non-creator wikis', () => {
@@ -1873,8 +2162,8 @@ describe('lib · federation', () => {
       assert.equal(rows[0].slug, 'elif-vs-frank')
       assert.equal(rows[0].site, 'frank.localhost')
       assert.equal(rows[0].opponentName, 'Elif')
-      assert.equal(rows[0].whiteLabel, 'frank.localhost (Frank)')
-      assert.equal(rows[0].blackLabel, 'elif.localhost (Elif)')
+      assert.equal(rows[0].whiteLabel, 'Frank (frank.localhost)')
+      assert.equal(rows[0].blackLabel, 'Elif (elif.localhost)')
       assert.equal(rows[0].event, 'Club Championship')
     })
 
@@ -2106,6 +2395,57 @@ describe('lib · federation', () => {
       assert.equal(deletionMetrics['bad.localhost'].ratio, 1)
       assert.equal(blockList['bad.localhost'].reason, 'deletion-ratio')
     })
+
+    it('computeIslandState stays connected for a small young federation', () => {
+      const events = [{ pgn: '[Date "2026.01.01"]\n\n1. e4 e5 1-0' }]
+      const players = { 'a.localhost': {}, 'b.localhost': {} }
+      const island = computeIslandState(events, players, null)
+      assert.equal(island.state, 'connected')
+      assert.equal(island.playerCount, 2)
+      assert.equal(shouldShowIslandNotice(island), false)
+    })
+
+    it('computeIslandState flags isolation only after a real pool collapses', () => {
+      const events = [{ pgn: '[Date "2026.01.01"]\n\n1. e4 e5 1-0' }]
+      const players = { 'a.localhost': {}, 'b.localhost': {} }
+      // 3 → 2 is below the contraction threshold but still a remnant of a real pool.
+      const previous = {
+        islandId: readGameTimelineKey(events[0].pgn).hash,
+        playerCount: 3,
+        state: 'connected',
+      }
+      const island = computeIslandState(events, players, previous)
+      assert.equal(island.state, 'isolated')
+      assert.equal(island.previousPlayerCount, 3)
+      assert.equal(shouldShowIslandNotice(island), true)
+    })
+
+    it('computeIslandState flags shifted on sharp contraction', () => {
+      const events = [{ pgn: '[Date "2026.01.01"]\n\n1. e4 e5 1-0' }]
+      const players = {
+        'a.localhost': {},
+        'b.localhost': {},
+        'c.localhost': {},
+        'd.localhost': {},
+      }
+      const previous = {
+        islandId: readGameTimelineKey(events[0].pgn).hash,
+        playerCount: 10,
+        state: 'connected',
+      }
+      const island = computeIslandState(events, players, previous)
+      assert.ok(4 < 10 * (1 - ISLAND_CONTRACTION_RATIO))
+      assert.equal(island.state, 'shifted')
+      assert.equal(shouldShowIslandNotice(island), true)
+    })
+
+    it('shouldShowIslandNotice hides stale isolated flags without prior pool size', () => {
+      assert.equal(
+        shouldShowIslandNotice({ state: 'isolated', playerCount: 2, previousPlayerCount: 0 }),
+        false,
+      )
+      assert.equal(shouldShowIslandNotice({ state: 'isolated', playerCount: 1 }), false)
+    })
   })
 
   describe('crawl fetch concurrency', () => {
@@ -2132,9 +2472,19 @@ describe('lib · federation', () => {
       let peak = 0
       const slugs = Array.from({ length: 12 }, (_, i) => `game-${i}`)
       const site = {
-        async getPage(_host, slug) {
-          if (slug === 'system/sitemap.json') {
-            return slugs.map((s, i) => ({ slug: s, date: i + 1 }))
+        async getPage(host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
+              chess: {
+                gameIndex: {
+                  completed: slugs.map(s => ({ host, slug: s, itemId: s })),
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
           }
           inFlight += 1
           peak = Math.max(peak, inFlight)
@@ -2157,6 +2507,252 @@ describe('lib · federation', () => {
       assert.ok(pageGames.length >= 12)
       assert.ok(peak <= SITE_FETCH_CONCURRENCY)
       assert.ok(peak >= 1)
+    })
+
+    it('diffSitemapSnapshots and ETA helpers support crawl reports', () => {
+      const snap = sitemapSnapshotForCrawl([
+        { slug: 'a', date: 2 },
+        { slug: 'b', date: 1 },
+      ])
+      assert.deepEqual(
+        snap.map(row => row.slug),
+        ['a', 'b'],
+      )
+      const hit = diffSitemapSnapshots(snap, snap)
+      assert.equal(hit.unchanged, true)
+      assert.equal(hit.fetchSlugs.length, 0)
+      const partial = diffSitemapSnapshots(snap, [
+        { slug: 'a', date: 2 },
+        { slug: 'b', date: 9 },
+      ])
+      assert.equal(partial.unchanged, false)
+      assert.deepEqual(partial.fetchSlugs, ['b'])
+      assert.ok(partial.keepSlugs.has('a'))
+      assert.equal(estimateCrawlEtaSeconds(10_000, 2, 5), 15)
+      assert.match(formatCrawlEtaLabel(10_000, 2, 5), /left/)
+      const pruned = pruneSiteCrawlCache(
+        normalizeSiteCrawlCache({
+          'old.localhost': { updatedAt: 1, sitemap: [], games: [] },
+          'new.localhost': { updatedAt: 9, sitemap: [], games: [] },
+        }),
+        1,
+      )
+      assert.deepEqual(Object.keys(pruned), ['new.localhost'])
+    })
+
+    it('reuses cached site games when the gameIndex fingerprint is unchanged', async () => {
+      const pgn = `[Event "Cached"]\n[Result "1-0"]\n\n1. e4 e5 *`
+      let pageFetches = 0
+      const site = {
+        async getPage(host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'cached-game', itemId: 'g1', gameHash: 'stable-hash' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
+          }
+          pageFetches += 1
+          return {
+            title: 'Cached',
+            story: [{ type: 'chess', id: 'g1', text: pgn }],
+          }
+        },
+      }
+      const first = await collectSiteGamesAsync(site, 'cache.localhost')
+      assert.equal(first.cacheHit, false)
+      assert.ok(first.pagesFetched >= 1)
+      assert.equal(first.games.length, 1)
+      assert.ok(first.cacheEntry?.gameIndexFingerprint)
+      const pagesAfterFirst = pageFetches
+      const second = await collectSiteGamesAsync(site, 'cache.localhost', {
+        siteCache: first.cacheEntry,
+      })
+      assert.equal(second.cacheHit, true)
+      assert.equal(second.pagesFetched, 0)
+      assert.equal(pageFetches, pagesAfterFirst)
+      assert.equal(second.games.length, 1)
+    })
+
+    it('refetches catalogued slugs when the gameIndex fingerprint changes', async () => {
+      const pgnA = `[Event "A"]\n[Result "1-0"]\n\n1. e4 *`
+      const pgnB1 = `[Event "B1"]\n[Result "1-0"]\n\n1. d4 *`
+      const pgnB2 = `[Event "B2"]\n[Result "0-1"]\n\n1. c4 *`
+      const fetched = []
+      let gameHashB = 'hash-b1'
+      const site = {
+        async getPage(host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [
+                    { host, slug: 'game-a', itemId: 'a', gameHash: 'hash-a' },
+                    { host, slug: 'game-b', itemId: 'b', gameHash: gameHashB },
+                  ],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
+          }
+          fetched.push(slug)
+          if (slug === 'game-a.json') {
+            return { title: 'A', story: [{ type: 'chess', id: 'a', text: pgnA }] }
+          }
+          if (slug === 'game-b.json') {
+            return {
+              title: 'B',
+              story: [{ type: 'chess', id: 'b', text: gameHashB === 'hash-b1' ? pgnB1 : pgnB2 }],
+            }
+          }
+          return null
+        },
+      }
+      const first = await collectSiteGamesAsync(site, 'delta.localhost')
+      assert.equal(first.games.length, 2)
+      fetched.length = 0
+      gameHashB = 'hash-b2'
+      const second = await collectSiteGamesAsync(site, 'delta.localhost', {
+        siteCache: first.cacheEntry,
+      })
+      assert.equal(second.cacheHit, false)
+      // Fingerprint change refetches all indexed slugs (not a per-row sitemap delta).
+      assert.ok(fetched.includes('game-a.json'))
+      assert.ok(fetched.includes('game-b.json'))
+      assert.equal(second.games.length, 2)
+      assert.ok(second.games.some(pgn => pgn.includes('B2')))
+      assert.ok(second.games.some(pgn => pgn.includes('[Event "A"]')))
+    })
+
+    it('selective-fetches catalogued slugs from survey gameIndex', async () => {
+      const pgn = `[White "index.localhost (Ada)"]
+[Black "peer.localhost (Bea)"]
+[Result "1-0"]
+[Rated "yes"]
+
+1. e4 e5 2. Nf3 1-0`
+      const stamped = stampCompletionTags(pgn, Date.parse('2026-01-02T00:00:00.000Z'))
+      const fetched = []
+      const site = {
+        async getPage(_host, slug) {
+          fetched.push(slug)
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host: 'index.localhost', slug: 'rated-win', itemId: 'g1' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
+          }
+          if (slug === 'rated-win.json') {
+            return { title: 'Rated', story: [{ type: 'chess', id: 'g1', text: stamped }] }
+          }
+          if (slug === 'system/sitemap.json') {
+            assert.fail('sitemap should not be required when gameIndex is present')
+          }
+          return null
+        },
+      }
+      const result = await collectSiteGamesAsync(site, 'index.localhost')
+      assert.equal(result.games.length, 1)
+      assert.ok(fetched.includes('my-chess-games.json'))
+      assert.ok(fetched.includes('rated-win.json'))
+      assert.equal(fetched.includes('system/sitemap.json'), false)
+      assert.ok(result.cacheEntry?.gameIndexFingerprint)
+    })
+
+    it('rebuilds from sitemap when gameIndex is empty and rebuildIfEmpty is set', async () => {
+      const activePgn = `[White "seed.localhost (Ada)"]
+[Black "peer.localhost (Bea)"]
+[Result "*"]
+[Rated "yes"]
+
+1. e4 e5 *`
+      const site = {
+        async getPage(_host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
+            }
+          }
+          if (slug === 'system/sitemap.json') {
+            return [{ slug: 'live-game', date: 1 }]
+          }
+          if (slug === 'live-game.json') {
+            return { title: 'Live', story: [{ type: 'chess', id: 'g1', text: activePgn }] }
+          }
+          return null
+        },
+      }
+      const empty = await fetchSiteGamePagesAsync(site, 'seed.localhost')
+      assert.equal(empty.pageGames.length, 0)
+      const rebuilt = await fetchSiteGamePagesAsync(site, 'seed.localhost', { rebuildIfEmpty: true })
+      assert.equal(rebuilt.pageGames.length, 1)
+      assert.ok(rebuilt.rebuiltGameIndex)
+      assert.equal(rebuilt.rebuiltGameIndex.active.length, 1)
+      assert.equal(rebuilt.rebuiltGameIndex.active[0].slug, 'live-game')
+    })
+
+    it('crawls hosts within a BFS wave with bounded concurrency', async () => {
+      let inFlight = 0
+      let peak = 0
+      const hosts = ['w0.localhost', 'w1.localhost', 'w2.localhost', 'w3.localhost']
+      const site = {
+        async getPage(host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'solo', itemId: 'g' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
+          }
+          inFlight += 1
+          peak = Math.max(peak, inFlight)
+          await new Promise(r => setTimeout(r, 20))
+          inFlight -= 1
+          return {
+            title: host,
+            story: [
+              {
+                type: 'chess',
+                id: 'g',
+                text: `[Event "Solo"]\n[White "${host} (A)"]\n[Black "${host} (B)"]\n[Rated "Yes"]\n[Result "1-0"]\n\n1. e4 e5 *`,
+              },
+            ],
+          }
+        },
+      }
+      const result = await fetchFederationGamesAsync(site, hosts, {
+        localSite: hosts[0],
+        fetchReach: 'survey',
+        expandGraph: false,
+      })
+      assert.ok(result)
+      assert.equal(result.crawled.length, hosts.length)
+      assert.ok(peak <= HOST_FETCH_CONCURRENCY)
+      assert.ok(peak >= 2)
+      assert.ok((result.crawlStats?.sitesCrawled || 0) >= hosts.length)
     })
   })
 
@@ -2181,8 +2777,18 @@ describe('lib · federation', () => {
           if (host === 'anya.localhost:3001') {
             throw new Error('opponent wiki should not be crawled')
           }
-          if (slug === 'system/sitemap.json') {
-            return [{ slug: 'rated-game', date: 1 }]
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
           }
           if (slug === 'rated-game.json') {
             return {
@@ -2208,8 +2814,18 @@ describe('lib · federation', () => {
     it('routes buildLeaderboardAsync mine mode through the local-only path', async () => {
       const site = {
         async getPage(host, slug) {
-          if (slug === 'system/sitemap.json') {
-            return [{ slug: 'rated-game', date: 1 }]
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
           }
           if (slug === 'rated-game.json') {
             return {
@@ -2253,8 +2869,18 @@ describe('lib · federation', () => {
       const site = {
         async getPage(host, slug) {
           touched.push(`${host}/${slug}`)
-          if (slug === 'system/sitemap.json') {
-            return [{ slug: 'rated-game', date: 1 }]
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
           }
           if (slug === 'rated-game.json') {
             let text = localGame
@@ -2309,8 +2935,18 @@ describe('lib · federation', () => {
       const site = {
         async getPage(host, slug) {
           touched.push(`${host}/${slug}`)
-          if (slug === 'system/sitemap.json') {
-            return [{ slug: 'rated-game', date: 1 }]
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+              chess: {
+                gameIndex: {
+                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  active: [],
+                  challenges: [],
+                },
+              },
+            }
           }
           if (slug === 'rated-game.json') {
             return {
@@ -2510,31 +3146,38 @@ describe('lib · federation', () => {
 
 1. e4 1-0`
 
-    // Mock wiki site: each host has one game page seating the listed opponents.
+    // Mock wiki site: each host has my-chess-games gameIndex + one game page.
     function chainSite(linksByHost) {
       const pages = new Map()
       for (const [host, pgns] of Object.entries(linksByHost)) {
         const h = String(host).toLowerCase()
+        const story = (Array.isArray(pgns) ? pgns : []).map((text, i) => ({
+          type: 'chess',
+          id: `g${i}`,
+          text,
+        }))
         pages.set(h, {
-          sitemap: [{ slug: 'game-1', date: 1 }],
+          'my-chess-games.json': {
+            title: SURVEY_PAGE_TITLE,
+            story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
+            chess: {
+              gameIndex: {
+                completed: story.length ? [{ host: h, slug: 'game-1', itemId: 'g0' }] : [],
+                active: [],
+                challenges: [],
+              },
+            },
+          },
           'game-1.json': {
             title: 'Game 1',
-            story: (Array.isArray(pgns) ? pgns : []).map((text, i) => ({
-              type: 'chess',
-              id: `g${i}`,
-              text,
-            })),
+            story,
           },
         })
       }
       return {
         async getPage(host, path) {
           const bag = pages.get(String(host || '').toLowerCase())
-          if (!bag) {
-            if (path === 'system/sitemap.json') return []
-            return null
-          }
-          if (path === 'system/sitemap.json') return bag.sitemap
+          if (!bag) return null
           return bag[path] || null
         },
       }
@@ -2611,14 +3254,17 @@ describe('lib · federation', () => {
       assert.ok(board.meta?.hopGraph)
     })
 
-    it('hop-bounded visible federation does not crawl federation-index seeds off the game graph', async () => {
-      // Index-only host has no rated path from hop0 — must not be treated as a hop-1 seed.
+    it('hop-bounded visible federation leaf-crawls federation-index hosts without expanding them', async () => {
+      // Index-only host has no rated path from hop0 — gameIndex-crawled as a leaf, but its
+      // opponents must not be enqueued into the hop BFS (elsewhere stays untouched).
       const links = {
         'hop0.localhost': [ratedLink('hop0.localhost', 'hop1.localhost', 'a')],
         'hop1.localhost': [ratedLink('hop1.localhost', 'hop2.localhost', 'b')],
         'hop2.localhost': [],
         'index-only.localhost': [ratedLink('index-only.localhost', 'elsewhere.localhost', 'c')],
-        'elsewhere.localhost': [],
+        'elsewhere.localhost': [ratedLink('elsewhere.localhost', 'far.localhost', 'd')],
+        'neighbor-bloated.localhost': [ratedLink('neighbor-bloated.localhost', 'far.localhost', 'e')],
+        'far.localhost': [],
       }
       const touched = []
       const base = chainSite(links)
@@ -2631,12 +3277,11 @@ describe('lib · federation', () => {
       const bounded = await buildLeaderboardAsync(site, 'hop0.localhost', {
         mode: 'survey',
         hopGraph: { maxHops: 2, hopDecay: 1 },
-        // Bloated neighbourhood must not become hop-1 seeds either.
-        neighborhoodSites: ['index-only.localhost', 'elsewhere.localhost'],
-        knownFederationSites: {
-          hosts: ['index-only.localhost', 'elsewhere.localhost'],
-          updatedAt: Date.now(),
-        },
+        // Bloated neighbourhood must not become BFS seeds or index leaves.
+        neighborhoodSites: ['neighbor-bloated.localhost', 'elsewhere.localhost'],
+        // Explicit index leaf list (skip live federation-search fetch in unit tests).
+        indexSites: ['index-only.localhost'],
+        fetchIndex: false,
       })
       assert.ok(bounded)
       assert.ok(touched.some(p => p.startsWith('hop0.localhost')))
@@ -2644,13 +3289,47 @@ describe('lib · federation', () => {
       assert.ok(touched.some(p => p.startsWith('hop2.localhost')))
       assert.equal(
         touched.some(p => p.startsWith('index-only.localhost')),
-        false,
+        true,
       )
       assert.equal(
         touched.some(p => p.startsWith('elsewhere.localhost')),
         false,
       )
+      assert.equal(
+        touched.some(p => p.startsWith('neighbor-bloated.localhost')),
+        false,
+      )
+      assert.ok((bounded.games || []).some(g => String(g).includes('index-only.localhost')))
       assert.ok((bounded.meta?.hopStats || []).length > 0)
+    })
+
+    it('resolveFederationIndexLeafHosts omits the local site and personal seeds', async () => {
+      const leaves = await resolveFederationIndexLeafHosts(null, 'me.localhost', {
+        indexSites: ['chess.viki.wiki', 'me.localhost', 'ward.dojo.fed.wiki'],
+        knownOpponents: ['should-not-appear.localhost'],
+      })
+      assert.deepEqual(leaves, ['chess.viki.wiki', 'ward.dojo.fed.wiki'])
+    })
+
+    it('resolveFederationIndexLeafHosts merges global index over a thin fresh cache', async () => {
+      resetChessPluginIndexCacheForTests()
+      const fetchImpl = async () => ({
+        ok: true,
+        async json() {
+          return {
+            results:
+              '<a href=//index-only.example target=index-only.example title=index-only.example>x</a>',
+          }
+        },
+      })
+      const leaves = await resolveFederationIndexLeafHosts(null, 'me.localhost', {
+        knownFederationSites: {
+          hosts: ['survey-only.example'],
+          updatedAt: Date.now(),
+        },
+        fetchImpl,
+      })
+      assert.deepEqual(leaves.sort(), ['index-only.example', 'survey-only.example'].sort())
     })
 
     it('skips blockListed hosts and does not expand through them', async () => {

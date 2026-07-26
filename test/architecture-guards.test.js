@@ -42,6 +42,7 @@ describe('guards · architecture', () => {
     assert.match(game, /export function startNewGameFromMenu\(/)
     assert.match(game, /export function playerBarHtml\(/)
     assert.match(game, /export function wirePositionEditor\(/)
+    assert.match(game, /import \* as BoardLayout from ['"]\.\/board-layout\.js['"]/)
     assert.doesNotMatch(game, /from ['"]\.\/chess-app\.js['"]/)
     assert.doesNotMatch(game, /postToShell\(\{\s*action:\s*MSG\./)
     // commentCtx exposes chessConsole directly — commentCtx.app throws and aborts
@@ -90,14 +91,21 @@ describe('guards · architecture', () => {
     assert.match(layout, /export function initInstallNudge/)
     assert.match(layout, /export async function queryChessPwaInstalled/)
     assert.match(index, /href="\/plugins\/chess\/manifest\.json"/)
+    assert.match(index, /href="icon-192\.png"/)
+    assert.match(index, /href="icon-512\.png"/)
     assert.match(index, /href="icon-120\.png"/)
     assert.doesNotMatch(index, /createObjectURL/)
     assert.match(index, /wiki-chess-sw-ready-reload/)
     assert.match(index, /navigator\.serviceWorker[\s\S]*register\('\/plugins\/chess\/service-worker\.js'/)
     assert.doesNotMatch(index, /type="module"[\s\S]*register\('\/plugins\/chess\/service-worker\.js'/)
-    assert.match(index, /wiki-chess-pwa-installed:/)
+    assert.doesNotMatch(index, /wiki-chess-pwa-installed:/)
+    assert.doesNotMatch(index, /localStorage\.getItem\('wiki-chess-color-theme'\)/)
+    assert.match(layout, /export function initUiPrefsBridge/)
+    assert.match(layout, /CHESS_PWA_INSTALLED_FLAG_PREFIX/)
     const chessApp = readFileSync(join(root, 'src/chess-app.js'), 'utf8')
     assert.match(chessApp, /initInstallNudge\(\)/)
+    assert.match(chessApp, /UI_PREFS_DB_NAME = 'wiki-chess-ui-v1'/)
+    assert.match(chessApp, /initUiPrefsBridge\(/)
     assert.doesNotMatch(layout, /from '\.\.\/client\/pwa-protocol\.js'/)
   })
 
@@ -111,6 +119,28 @@ describe('guards · architecture', () => {
     assert.match(src, /favicon\.png\?v=/)
     assert.match(src, /icon-512\.png/)
     assert.match(src, /icon-192\.png/)
+  })
+
+  // Packed installs omit most of src/; server still imports chess-core + federation (→ cm-pgn).
+  // Without those in `files` / dependencies, startServer fails and Android gets a letter icon.
+  it('npm package ships the server import graph for startServer', () => {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+    assert.ok(pkg.files.includes('src/chess-core.js'), 'pack must include src/chess-core.js')
+    assert.ok(pkg.files.includes('src/federation.js'), 'pack must include src/federation.js')
+    assert.ok(pkg.dependencies?.['cm-pgn'], 'cm-pgn must be a production dependency')
+    const puzzle = readFileSync(join(root, 'server/puzzle-server.js'), 'utf8')
+    const bridge = readFileSync(join(root, 'server/pwa-bridge.js'), 'utf8')
+    assert.match(puzzle, /from '\.\.\/src\/chess-core\.js'/)
+    assert.match(puzzle, /from '\.\.\/src\/federation\.js'/)
+    assert.match(bridge, /from '\.\.\/src\/federation\.js'/)
+    const packed = execSync('npm pack --dry-run --ignore-scripts --json', {
+      cwd: root,
+      encoding: 'utf8',
+    })
+    const files = JSON.parse(packed)[0].files.map(f => f.path.replace(/\\/g, '/'))
+    assert.ok(files.includes('src/chess-core.js'), 'npm pack must include src/chess-core.js')
+    assert.ok(files.includes('src/federation.js'), 'npm pack must include src/federation.js')
+    assert.ok(files.includes('server/server.js'), 'npm pack must include server/server.js')
   })
 
   it('installed PWA awaits /session before boot so auth is not wiped by initializeChess', () => {
@@ -181,6 +211,7 @@ describe('guards · architecture', () => {
       /function popupStateStorageKey\(\) {\s*\n\s*return `\$\{pwaStoragePrefix\(restorePwaContext\(\)\)\}PopupState`/,
     )
     assert.match(layout, /export function rememberPopupState/)
+    assert.match(layout, /export function hydratePopupAuthFromSession/)
     assert.doesNotMatch(layout, /WikiChess-playSnapshot/)
     assert.doesNotMatch(layout, /mergeIncomingWithPlaySnapshot/)
   })
@@ -236,9 +267,11 @@ describe('guards · architecture', () => {
     )
   })
 
-  it('persists auto-fork game-end preference in local prefs keys', () => {
+  it('persists auto-fork game-end preference in IndexedDB UI prefs keys', () => {
     const src = readFileSync(join(root, 'src/chess-app.js'), 'utf8')
     assert.match(src, /PREFERENCE_SETTING_KEYS = \[[\s\S]*'autoAcceptOpponentWikiGameEnd'/)
+    assert.match(src, /UI_PREFS_DB_NAME = 'wiki-chess-ui-v1'/)
+    assert.doesNotMatch(src, /wiki-chess-prefs:\$\{/)
   })
 
   it('page-fork coalesces null remote gameSettings instead of resetting defaults', () => {

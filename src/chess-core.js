@@ -6,7 +6,7 @@
  *   1 · Keywords        GAME/POSITION/PUZZLE/CHOOSE/SURVEY/LEADERBOARD item modes
  *   2 · ChessRules      FEN/PGN/figurine validation + format detection (`ChessRules`)
  *   3 · Paste           clipboard capture / ghost fork meta (`Paste`)
- *   4 · PuzzlePool      filters, CSV/JSONL rows, adaptive coach, training log
+ *   4 · PuzzlePool      filters, CSV/JSONL rows, adaptive coach
  *   5 · Journal         autosave guards, page actions, save planning (`Journal`)
  *   6 · Identity        wiki player ids, PGN tags, board labels
  *   7 · Session         app lifecycle FSM (iframe / popup / PWA)
@@ -333,7 +333,7 @@ export function isEditableChessItemText(text) {
       if (/\[[^\]]+\]/.test(content) || /^\s*1\./m.test(content)) return true
       if (isPuzzleRow(content)) return true
       if (/\bRANDOM\b/i.test(content)) return true
-      if (/rating=|popularity=|pop=|themes?=|theme=|tags?=|tag=|adaptive=|solved=|failed=/i.test(content)) return true
+      if (/rating=|popularity=|pop=|themes?=|theme=|tags?=|tag=|adaptive=|solved=|failed=|next=|done=/i.test(content)) return true
       const fmt = getFormat(content)
       return fmt === 'FEN' ? isValidFenString(content) : false
     }
@@ -648,6 +648,11 @@ export function parsePuzzleSpec(content) {
     } else if (key === 'failed') {
       const ids = normalizePuzzleIdList(value)
       if (ids.length) result.filters.failedIds = ids
+    } else if (key === 'next') {
+      const next = normalizePuzzlePageList(value)[0] || String(value || '').trim().toLowerCase()
+      if (next) result.filters.next = next
+    } else if (key === 'done') {
+      result.filters.done = /^(1|true|yes)$/i.test(String(value || '').trim())
     }
   }
   return result
@@ -657,6 +662,8 @@ export function formatPuzzleSpec(filters = {}) {
   const f = filters || {}
   const tokens = []
   if (f.adaptive) tokens.push('adaptive=true')
+  if (f.done) tokens.push('done=1')
+  if (f.next) tokens.push(`next=${String(f.next).trim()}`)
   if (f.minRating != null || f.maxRating != null) {
     tokens.push(`rating=${f.minRating ?? ''}..${f.maxRating ?? ''}`)
   }
@@ -702,22 +709,29 @@ export function puzzleBankBodyText(itemText) {
   return lines.join('\n')
 }
 
-// Rewrite the PUZZLE filter line while preserving a multiline bank body.
-// Used by Puzzle Coach to persist `solved=` / `failed=` / tier rating without dropping JSONL rows.
+// Rewrite the PUZZLE filter line while preserving a multiline bank / teach-PGN body.
+// Adaptive coach + lesson `done=` / `next=` progress live here so FedWiki Local Changes
+// (yellow page JSON) can export and later restore academy progress.
 export function rewritePuzzleItemText(itemText, filters = {}) {
   const body = puzzleBankBodyText(itemText)
   const head = buildPuzzleItemText(filters)
   return body ? `${head}\n${body}` : head
 }
 
+// Gentle starter window when adaptive=true has no rating= clause.
+export const ADAPTIVE_COACH_DEFAULT_RATING = Object.freeze({ min: 400, max: 700 })
+
 // Clamp and slide an adaptive coach rating window after a solve or fail.
 export function scaleAdaptivePuzzleRating(filters = {}, outcome = 'solved', step = 50) {
   const f = { ...(filters || {}) }
+  const fallbackMin = ADAPTIVE_COACH_DEFAULT_RATING.min
+  const fallbackMax = ADAPTIVE_COACH_DEFAULT_RATING.max
   const width = Math.max(
     step,
-    (typeof f.maxRating === 'number' ? f.maxRating : 1200) - (typeof f.minRating === 'number' ? f.minRating : 800),
+    (typeof f.maxRating === 'number' ? f.maxRating : fallbackMax) -
+      (typeof f.minRating === 'number' ? f.minRating : fallbackMin),
   )
-  let min = typeof f.minRating === 'number' ? f.minRating : 800
+  let min = typeof f.minRating === 'number' ? f.minRating : fallbackMin
   let max = typeof f.maxRating === 'number' ? f.maxRating : min + width
   const delta = outcome === 'solved' ? step : -step
   min += delta
@@ -758,6 +772,94 @@ export function recordAdaptivePuzzleOutcome(filters = {}, outcome = 'solved', pu
   return scaleAdaptivePuzzleRating(f, outcome)
 }
 
+// Progress fields carried on a PUZZLE item's first-line spec (exportable via page JSON).
+export function puzzleItemProgressFromText(itemText) {
+  const parsed = parseChessItem(itemText)
+  if (parsed.mode !== 'PUZZLE') {
+    return { done: false, next: '', adaptive: false, solvedIds: [], failedIds: [] }
+  }
+  const spec = parsePuzzleSpec(parsed.content)
+  const f = spec.filters || {}
+  return {
+    done: Boolean(f.done),
+    next: String(f.next || '').trim().toLowerCase(),
+    adaptive: Boolean(spec.adaptive || f.adaptive),
+    minRating: typeof f.minRating === 'number' ? f.minRating : undefined,
+    maxRating: typeof f.maxRating === 'number' ? f.maxRating : undefined,
+    solvedIds: normalizePuzzleIdList(f.solvedIds),
+    failedIds: normalizePuzzleIdList(f.failedIds),
+  }
+}
+
+// Merge progress into item text without dropping teach-PGN / JSONL body lines.
+export function markPuzzleItemProgress(itemText, patch = {}) {
+  const parsed = parseChessItem(itemText)
+  if (parsed.mode !== 'PUZZLE') return String(itemText || '')
+  const spec = parsePuzzleSpec(parsed.content)
+  const filters = { ...(spec.filters || {}) }
+  if (spec.adaptive) filters.adaptive = true
+  if (patch.done != null) filters.done = Boolean(patch.done)
+  if (patch.next != null) {
+    const next = String(patch.next || '').trim().toLowerCase()
+    if (next) filters.next = next
+    else delete filters.next
+  }
+  if (Array.isArray(patch.solvedIds)) filters.solvedIds = normalizePuzzleIdList(patch.solvedIds)
+  if (Array.isArray(patch.failedIds)) filters.failedIds = normalizePuzzleIdList(patch.failedIds)
+  if (typeof patch.minRating === 'number') filters.minRating = patch.minRating
+  if (typeof patch.maxRating === 'number') filters.maxRating = patch.maxRating
+  if (patch.adaptive != null) filters.adaptive = Boolean(patch.adaptive)
+  return rewritePuzzleItemText(parsed.rawText || itemText, filters)
+}
+
+// Summarize Local Changes / lineup pages into per-slug academy progress.
+export function academyProgressFromLocalPages(pages = []) {
+  const bySlug = {}
+  for (const page of Array.isArray(pages) ? pages : []) {
+    const slug = String(page?.slug || '')
+      .trim()
+      .toLowerCase()
+    if (!slug) continue
+    let done = false
+    let next = ''
+    let adaptive = null
+    for (const item of Array.isArray(page?.story) ? page.story : []) {
+      if (item?.type !== 'chess') continue
+      const prog = puzzleItemProgressFromText(item.text)
+      if (prog.done) done = true
+      if (prog.next && !next) next = prog.next
+      if (prog.adaptive) {
+        adaptive = {
+          minRating: prog.minRating,
+          maxRating: prog.maxRating,
+          solvedIds: prog.solvedIds,
+          failedIds: prog.failedIds,
+        }
+      }
+    }
+    bySlug[slug] = { done, next, adaptive, title: String(page?.title || '').trim() }
+  }
+  return bySlug
+}
+
+// Walk `next=` links, skipping pages already marked done in local page JSON.
+export function resolveSmartAcademyNext(startNext, progressBySlug = {}, { maxHops = 24 } = {}) {
+  let slug = String(startNext || '')
+    .trim()
+    .toLowerCase()
+  const seen = new Set()
+  for (let i = 0; i < maxHops && slug; i++) {
+    if (seen.has(slug)) break
+    seen.add(slug)
+    const prog = progressBySlug[slug]
+    if (!prog?.done) return slug
+    slug = String(prog.next || '')
+      .trim()
+      .toLowerCase()
+  }
+  return slug || null
+}
+
 // Theme ids (Lichess) → Academy page titles used for [[inline wiki links]].
 export const PUZZLE_THEME_ACADEMY_PAGES = Object.freeze({
   fork: 'The Fork',
@@ -776,6 +878,7 @@ export const PUZZLE_THEME_ACADEMY_PAGES = Object.freeze({
   quietMove: 'Quiet Move',
   sacrifice: 'Sacrifice',
   hangingPiece: 'Hanging Piece',
+  pieceMove: 'How Pieces Move',
   advancedPawn: 'Advanced Pawn',
   attackingF2F7: 'Attacking f2 and f7',
   kingsideAttack: 'Kingside Attack',
@@ -948,6 +1051,8 @@ export function hasActivePuzzleFilters(filters = {}) {
   if (Array.isArray(f.pageSlugs) && f.pageSlugs.length) return true
   if (Array.isArray(f.solvedIds) && f.solvedIds.length) return true
   if (Array.isArray(f.failedIds) && f.failedIds.length) return true
+  if (f.next) return true
+  if (f.done) return true
   return ['minRating', 'maxRating', 'minPopularity', 'maxPopularity'].some(key => typeof f[key] === 'number')
 }
 
@@ -1226,90 +1331,6 @@ export function looksLikeTeachPuzzlePgn(text) {
   if (!body) return false
   if (/^\[(?:Event|FEN|SetUp|Site|White|Black)\b/m.test(body)) return true
   return /^\s*1\./m.test(body) && /\{[^}]+\}/.test(body)
-}
-
-// localStorage key for the opt-in Chess Academy training log (living report card).
-export const TRAINING_LOG_STORAGE_KEY = 'wiki-chess-training-log'
-
-export function emptyTrainingLog() {
-  return { version: 1, completions: [] }
-}
-
-export function readTrainingLog(storage = globalThis.localStorage) {
-  try {
-    const raw = storage?.getItem?.(TRAINING_LOG_STORAGE_KEY)
-    if (!raw) return emptyTrainingLog()
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return emptyTrainingLog()
-    const completions = Array.isArray(parsed.completions) ? parsed.completions : []
-    return { version: 1, completions }
-  } catch {
-    return emptyTrainingLog()
-  }
-}
-
-export function writeTrainingLog(log, storage = globalThis.localStorage) {
-  const next = {
-    version: 1,
-    completions: Array.isArray(log?.completions) ? log.completions : [],
-  }
-  storage?.setItem?.(TRAINING_LOG_STORAGE_KEY, JSON.stringify(next))
-  return next
-}
-
-// Record an opt-in puzzle completion. Keys by pageSlug + itemId (+ puzzleId).
-// Returns the new entry (or existing one when already logged).
-export function recordTrainingCompletion(entry, storage = globalThis.localStorage) {
-  const pageSlug = String(entry?.pageSlug || '').trim()
-  const itemId = String(entry?.itemId || '').trim()
-  const puzzleId = String(entry?.puzzleId || '').trim()
-  if (!pageSlug || !itemId) return null
-  const log = readTrainingLog(storage)
-  const existing = log.completions.find(
-    c => c.pageSlug === pageSlug && c.itemId === itemId && (c.puzzleId || '') === puzzleId,
-  )
-  if (existing) return existing
-  const nextEntry = {
-    pageSlug,
-    itemId,
-    puzzleId,
-    tags: puzzleTagList(entry),
-    themes: normalizePuzzleTagList(entry?.themes),
-    certifiedAt: Number(entry?.certifiedAt) || Date.now(),
-    title: String(entry?.title || '').trim(),
-  }
-  log.completions.push(nextEntry)
-  writeTrainingLog(log, storage)
-  return nextEntry
-}
-
-export function hasTrainingCompletion({ pageSlug, itemId, puzzleId } = {}, storage = globalThis.localStorage) {
-  const slug = String(pageSlug || '').trim()
-  const id = String(itemId || '').trim()
-  const pid = String(puzzleId || '').trim()
-  if (!slug || !id) return false
-  return readTrainingLog(storage).completions.some(
-    c => c.pageSlug === slug && c.itemId === id && (c.puzzleId || '') === pid,
-  )
-}
-
-// Suggest concept tags the learner has not certified yet (for diagnostics).
-export function recommendTagsFromTrainingLog(candidateTags = [], storage = globalThis.localStorage) {
-  const done = new Set()
-  for (const c of readTrainingLog(storage).completions) {
-    for (const tag of puzzleTagList(c)) done.add(tag)
-  }
-  return normalizePuzzleTagList(candidateTags).filter(tag => !done.has(tag))
-}
-
-// Paragraph text written to a personal fork journal when certifying completion.
-export function formatTrainingLogJournalParagraph(entry) {
-  const when = new Date(entry?.certifiedAt || Date.now()).toISOString().slice(0, 10)
-  const tags = puzzleTagList(entry)
-  const tagPart = tags.length ? ` Tags: ${tags.join(', ')}.` : ''
-  const puzzlePart = entry?.puzzleId ? ` Puzzle \`${entry.puzzleId}\`.` : ''
-  const titlePart = entry?.title ? ` (${entry.title})` : ''
-  return `Certified chess training${titlePart} on ${when}.${puzzlePart}${tagPart}`
 }
 
 export function puzzleFiltersToSearchParams(filters = {}, params = new URLSearchParams()) {
@@ -1699,7 +1720,8 @@ export function mergeItemTextIntoChessObj(chessObj, text) {
 export const PIECE_SET_STORAGE_KEY = 'wiki-chess-piece-set'
 export const DEFAULT_PIECE_SET_ID = 'merida'
 
-// Bootstrap 5.3 color mode preference (site-wide localStorage — not journal).
+// Legacy localStorage key name (migrated into IndexedDB `wiki-chess-ui-v1`).
+// Bootstrap 5.3 color mode preference (site-wide — not journal).
 // `auto` follows OS prefers-color-scheme; `light` / `dark` are explicit.
 export const COLOR_THEME_STORAGE_KEY = 'wiki-chess-color-theme'
 export const COLOR_THEME_IDS = Object.freeze(['auto', 'light', 'dark'])
@@ -1846,11 +1868,12 @@ export const DEFAULT_GAME_SETTINGS = Object.freeze({
   confirmMoves: false,
   // Pass-and-play: re-orient the whole board after each move (hand-around / self-play).
   // Off by default — hand-around setup or the settings panel opts in. Only applies to
-  // same-device human games (see shouldRotateBoardForSideToMove). Live-play preference
-  // is localStorage-only and cleared when the game ends.
+  // same-device human games (see shouldRotateBoardForSideToMove). Personal preference is
+  // IndexedDB-global; page authors can force via `[SameDeviceFlip]`. Finished games suppress
+  // flip in-session so archived boards do not keep rotating.
   sameDeviceFlip: false,
   // Opposite-sides tabletop: rotate glyphs 180° when the far seat is to move (board stays put).
-  // Independent of sameDeviceFlip — see shouldFlipPiecesInPlace. Same ephemeral lifecycle.
+  // Independent of sameDeviceFlip — see shouldFlipPiecesInPlace. Same lifecycle as above.
   sameDeviceFlipPieces: false,
   // When 'random', directed wiki challenges resolve colours when the invitee accepts.
   challengeCreatorColor: '',
@@ -1879,18 +1902,16 @@ export function isChessAcademyWikiSite(host) {
     .includes('chess-academy')
 }
 
-// Site-wide game-setting defaults layered under item + local prefs.
+// Site-wide game-setting defaults layered under personal IndexedDB prefs + PGN tags.
 // Academy teaching pages surface annotated model-game comments below the board.
 export function siteGameSettingDefaults(host) {
   if (isChessAcademyWikiSite(host)) return { showAnnotationsBelow: true }
   return {}
 }
 
-// Optional PGN override for the comments / annotations banner.
-// `[Comments "on"]` → enable move comments + show annotations below by default.
-// `[Comments "off"]` → keep both off (overrides Academy site defaults when present).
-export function parseCommentsTag(pgn) {
-  const raw = String(getPgnTag(pgn, 'Comments') || '')
+// Shared on/off parser for showcase PGN tags (`[Comments]`, `[ConfirmMoves]`, …).
+export function parseOnOffPgnTag(pgn, tagName) {
+  const raw = String(getPgnTag(pgn, tagName) || '')
     .trim()
     .toLowerCase()
   if (!raw) return null
@@ -1899,13 +1920,52 @@ export function parseCommentsTag(pgn) {
   return null
 }
 
-// Per-scoresheet game-setting defaults from PGN tags (under site defaults, over globals).
+// Optional PGN override for the comments / annotations banner.
+// `[Comments "on"]` → enable move comments + show annotations below by default.
+// `[Comments "off"]` → keep both off (overrides Academy site defaults when present).
+export function parseCommentsTag(pgn) {
+  return parseOnOffPgnTag(pgn, 'Comments')
+}
+
+// Teaching / walkthrough scoresheets (`[Demo "1"]` or `[Lesson "1"]`) are not live
+// games — hide Resign, skip remote human sync, etc. Result may still be "*" so the
+// board can replay the model line.
+export function isDemoOrLessonGame(pgn) {
+  for (const tag of ['Demo', 'Lesson']) {
+    const raw = String(getPgnTag(pgn, tag) || '')
+      .trim()
+      .toLowerCase()
+    if (!raw) continue
+    if (raw === '1' || raw === 'on' || raw === 'yes' || raw === 'true' || raw === 'demo' || raw === 'lesson') {
+      return true
+    }
+  }
+  return false
+}
+
+// Per-scoresheet game-setting defaults from PGN tags (win over site + personal prefs).
 // Annotated teaching games use `[Comments "on"]` so ordinary GAME boards stay banner-off.
+// Academy / showcase pages may also set ConfirmMoves / SameDeviceFlip(+Pieces).
 export function pgnGameSettingDefaults(pgn) {
+  const out = {}
   const comments = parseCommentsTag(pgn)
-  if (comments === 'on') return { enableComments: true, showAnnotationsBelow: true }
-  if (comments === 'off') return { enableComments: false, showAnnotationsBelow: false }
-  return {}
+  if (comments === 'on') {
+    out.enableComments = true
+    out.showAnnotationsBelow = true
+  } else if (comments === 'off') {
+    out.enableComments = false
+    out.showAnnotationsBelow = false
+  }
+  const confirm = parseOnOffPgnTag(pgn, 'ConfirmMoves')
+  if (confirm === 'on') out.confirmMoves = true
+  else if (confirm === 'off') out.confirmMoves = false
+  const flip = parseOnOffPgnTag(pgn, 'SameDeviceFlip')
+  if (flip === 'on') out.sameDeviceFlip = true
+  else if (flip === 'off') out.sameDeviceFlip = false
+  const flipPieces = parseOnOffPgnTag(pgn, 'SameDeviceFlipPieces')
+  if (flipPieces === 'on') out.sameDeviceFlipPieces = true
+  else if (flipPieces === 'off') out.sameDeviceFlipPieces = false
+  return out
 }
 
 // True when movetext contains at least one non-empty PGN brace comment.
@@ -2737,14 +2797,45 @@ export function formatPlayerId(username, wikiSite) {
 }
 
 // Default display name for an unauthenticated guest player. A guest seat is a plain
-// editable name with no wiki host — it lives in the local PGN and the browser's
-// localStorage, but never gets written to the wiki journal (the page isn't theirs
-// to save). Authenticated wiki owners get a federated "host (name)" seat instead.
+// editable name with no wiki host — it lives in the local PGN (and the preferred name
+// is remembered in IndexedDB). On a site the visitor does not own, the seat rides the
+// yellow Local Changes fork rather than the origin journal. Authenticated wiki owners
+// get a federated "host (name)" seat instead.
 export const GUEST_PLAYER_NAME = 'Guest'
 
 // Plain guest display name (no wiki host) for the local seat of an unauthenticated viewer.
 export function guestSeatName(guestName) {
   return String(guestName || '').trim() || GUEST_PLAYER_NAME
+}
+
+// True when a PGN seat is still a plain guest display name (no wiki domain) matching the
+// remembered guest name — used to keep moves unlocked after sign-in until the seat is
+// rewritten to a federated wiki identity.
+export function isPlainGuestSeatTag(playerTag, guestName) {
+  if (!playerTag || isOpenSeatTag(playerTag)) return false
+  if (parseStockfishLevel(playerTag) != null) return false
+  const parsed = parsePlayerId(playerTag)
+  if (parsed?.domain) return false
+  const trimmed = String(playerTag).trim()
+  const guestId = guestSeatName(guestName)
+  return trimmed === guestId || trimmed === GUEST_PLAYER_NAME
+}
+
+// Rewrite a plain guest seat to the signed-in wiki identity. Returns the (possibly
+// unchanged) PGN. Upgrades at most one seat — White preferred when both match.
+export function upgradeGuestSeatTagsToWikiIdentity(
+  pgn,
+  { signedInDisplayName, ownerName, wikiSite, guestName } = {},
+) {
+  if (!pgn || !/\[/.test(pgn)) return pgn
+  const displayName = resolveSignedInUsername(signedInDisplayName || ownerName)
+  if (!displayName) return pgn
+  const localId = formatPlayerId(displayName, wikiSite || 'localhost')
+  const white = getPgnTag(pgn, 'White')
+  const black = getPgnTag(pgn, 'Black')
+  if (isPlainGuestSeatTag(white, guestName)) return formatPgn(setPgnTag(pgn, 'White', localId))
+  if (isPlainGuestSeatTag(black, guestName)) return formatPgn(setPgnTag(pgn, 'Black', localId))
+  return pgn
 }
 
 // The PGN tag the local viewer should occupy when they sit down:
@@ -2862,7 +2953,8 @@ export function readPeerMissingPgnTag(pgn) {
   return raw === 'yes' || raw === 'true' || raw === '1'
 }
 
-// Plain-text board / UI label: hostname first, display name in parentheses
+// Plain-text board / UI label: display name first, hostname secondary
+// (matches My Chess Games seat rows).
 export function formatPlayerDisplayLabel(name) {
   if (isOpenSeatTag(name)) return OPEN_SEAT_LABEL
   const parsed = parsePlayerId(name)
@@ -2871,7 +2963,7 @@ export function formatPlayerDisplayLabel(name) {
     const level = parseStockfishLevel(parsed.username)
     return level != null ? stockfishDisplayLabel(level) : parsed.username
   }
-  if (parsed.domain) return `${parsed.domain} (${parsed.username})`
+  if (parsed.domain) return `${parsed.username} (${wikiSiteLinkLabel(parsed.domain)})`
   return parsed.full
 }
 
@@ -3450,11 +3542,16 @@ export function playerWikiSiteLinkHtml(domain, username, { className = 'wiki-che
   const href = wikiSitePageUrl(domain)
   const label = wikiSiteLinkLabel(domain)
   const target = wikiSiteLinkTarget(domain)
-  const who = username ? ` (${escapeHtml(username)})` : ''
-  return `<a class="${className}" href="${escapeHtml(href)}" target="${escapeHtml(target)}" rel="noopener noreferrer" title="Visit ${escapeHtml(label)}">${escapeHtml(label)}</a>${who}`
+  const domainLink = `<a class="${className}" href="${escapeHtml(href)}" target="${escapeHtml(target)}" rel="noopener noreferrer" title="Visit ${escapeHtml(label)}">${escapeHtml(label)}</a>`
+  // Display name first; domain secondary (matches My Chess Games seat rows).
+  if (!username) return domainLink
+  return `${escapeHtml(username)} <span class="wiki-chess-wiki-site-label">${domainLink}</span>`
 }
 
 // Prefer PGN [White]/[Black] tags — player.name can lag or omit @wikiSite.
+// Returns the canonical host-first wiki tag (`host (name)`), not a display label —
+// playerBarHtml / playerFaviconHtml / parsePlayerId all expect that form. Display
+// order (name first) is applied in playerWikiSiteLinkHtml.
 // Engine seats show level only here; UCI Elo is rendered beside the name in the player bar.
 export function boardPlayerLabelFromPgn(player, console) {
   if (isStockfishPlayer(player)) {
@@ -3466,13 +3563,13 @@ export function boardPlayerLabelFromPgn(player, console) {
       const tag = tags.White || boardPlayerLabel(player)
       const level = parseStockfishLevel(tag)
       if (level != null) return stockfishPlayerId(level)
-      return formatPlayerDisplayLabel(tag)
+      return tag
     }
     if (player === console.playerBlack()) {
       const tag = tags.Black || boardPlayerLabel(player)
       const level = parseStockfishLevel(tag)
       if (level != null) return stockfishPlayerId(level)
-      return formatPlayerDisplayLabel(tag)
+      return tag
     }
   }
   return boardPlayerLabel(player)
@@ -3812,6 +3909,8 @@ export function mergePgnWithSavedHeaders(exported, savedPgn) {
     'Result',
     'HumanPlay',
     'Comments',
+    'Demo',
+    'Lesson',
     'StartView',
     'Termination',
     'Rated',
@@ -3919,6 +4018,13 @@ export function resolveLocalPlayerColor(pgn, ctx = {}) {
     const guestId = guestSeatName(ctx.guestName)
     return black === guestId && white !== guestId ? 'b' : 'w'
   }
+  // Signed in mid-game: seat may still be the plain guest name until upgraded.
+  if (isPlainGuestSeatTag(black, ctx.guestName) && !isPlainGuestSeatTag(white, ctx.guestName)) {
+    return 'b'
+  }
+  if (isPlainGuestSeatTag(white, ctx.guestName)) {
+    return 'w'
+  }
   const viewingSite = pgnStampSite({ wikiSite, pageOnThisWiki })
   const whiteOnSite = playerTagOnViewingWikiSite(white, viewingSite)
   const blackOnSite = playerTagOnViewingWikiSite(black, viewingSite)
@@ -3934,6 +4040,14 @@ export function isWikiLinkedPlayerTag(name) {
   const parsed = parsePlayerId(name)
   if (!parsed || parsed.isEngine) return false
   return Boolean(parsed.domain)
+}
+
+// Plain seat names (not Stockfish, not host (name) wiki seats) may be click-edited
+// on the board; the rename lands in the journal on the next saved move.
+export function isManuallyEditablePlayerTag(name) {
+  if (name == null || isOpenSeatTag(name)) return false
+  if (parseStockfishLevel(name) != null) return false
+  return !isWikiLinkedPlayerTag(name)
 }
 
 function humanDisplayName(ownerName, fallback = 'Player 1') {
@@ -3981,7 +4095,7 @@ export function playerDisplayLabel(name) {
   const parsed = parsePlayerId(name)
   if (!parsed) return String(name)
   if (parsed.isEngine) return parsed.username
-  if (parsed.domain) return `${parsed.domain} (${parsed.username})`
+  if (parsed.domain) return `${parsed.username} (${wikiSiteLinkLabel(parsed.domain)})`
   return parsed.full
 }
 
@@ -4847,6 +4961,18 @@ export function evaluateGameSyncUpdate({
   return { accept: true, reason: null, localPly, incomingPly }
 }
 
+// Shell ↔ app postMessage contract. Every envelope is `{ action, …fields }`.
+// High-traffic payloads (keep handlers / PWA bridge in sync when these change):
+//   get-state / set-state — itemId, pageKey; set-state also PGN|FEN|chessState|itemText, applying?
+//   state-exported — itemId, pageKey, text|PGN|FEN
+//   realtime-presence / realtime-signal — itemId, pageKey, realtime|signal, fromSeat?, toSeat?
+//   remote-opponent-state — itemId, pageKey, PGN|chessState|itemText
+//   viewer-context — ownerName, isOwner, isAuthenticated, wikiSite
+//   leaderboard-data / survey-* / rating-state — requestId?, partial?, error?, plus job payload
+//   apply-linked-board — itemId, pageKey, PGN|chessState
+//   paste-capture — text, format?
+// Sync gate (not a wire MSG): evaluateGameSyncUpdate({ localPgn, incomingPgn, source, localPlyEpoch, applying, sameItemText })
+//   → { accept, reason, localPly, incomingPly }; source ∈ GAME_SYNC_SOURCE
 export const MSG = Object.freeze({
   // ── App → shell ────────────────────────────────────────────────────────────
   GET_STATE: 'get-state',
@@ -4878,6 +5004,8 @@ export const MSG = Object.freeze({
   OPEN_SURVEY_PAGE: 'open-survey-page',
   OPEN_LEADERBOARD_PAGE: 'open-leaderboard-page',
   OPEN_GAME_PAGE: 'open-game-page',
+  // App → shell: ghost page of FedWiki reference items (crawl site/game hits).
+  SHOW_CRAWL_HITS_PAGE: 'show-crawl-hits-page',
   CREATE_PREVIEW: 'create-preview',
   UPDATE_GHOST_PAGE_TITLE: 'update-ghost-page-title',
   SYNC_GHOST_PREVIEW_TEXT: 'sync-ghost-preview-text',
@@ -4887,16 +5015,16 @@ export const MSG = Object.freeze({
   REGISTER_NEIGHBORS: 'register-neighbors',
   OPEN_ITEM_EDITOR: 'open-item-editor',
   FETCH_UI: 'fetch-ui',
+  // App → shell: full-viewport OK alert on the parent wiki window (crawl complete, etc.).
+  ALERT_UI: 'alert-ui',
   EMBED_WHEEL_SCROLL: 'embed-wheel-scroll',
   REQUEST_RESIGN: 'request-resign',
   REQUEST_SWITCH_GAME_MODE: 'request-switch-game-mode',
-  REQUEST_OPEN_POSITION_EDITOR: 'request-open-position-editor',
   REQUEST_SIGN_IN: 'request-sign-in',
   REQUEST_VIEWER_CONTEXT: 'request-viewer-context',
   LOOKUP_SITE_DISPLAY: 'lookup-site-display',
-  // App → shell: opt-in training-log paragraph on an owned / forked page.
-  CERTIFY_TRAINING_LOG: 'certify-training-log',
   FETCH_PUZZLE_PAGES: 'fetch-puzzle-pages',
+  FETCH_LOCAL_ACADEMY_PROGRESS: 'fetch-local-academy-progress',
 
   // ── Shell → app ────────────────────────────────────────────────────────────
   SET_STATE: 'set-state',
@@ -4915,9 +5043,10 @@ export const MSG = Object.freeze({
   CHALLENGE_JOIN_FORKED: 'challenge-join-forked',
   SITE_DISPLAY: 'site-display',
   PUZZLE_PAGES_DATA: 'puzzle-pages-data',
+  LOCAL_ACADEMY_PROGRESS_DATA: 'local-academy-progress-data',
 
   // ── Shell ↔ app relays (active popup / linked PWA routes iframe ↔ host) ───
-  // REQUEST_RESIGN, REQUEST_SWITCH_GAME_MODE, REQUEST_OPEN_POSITION_EDITOR,
+  // REQUEST_RESIGN, REQUEST_SWITCH_GAME_MODE,
   // APPLY_LINKED_BOARD (follower move → journal host)
 
   // ── Linked-surface board relay (follower → host) ───────────────────────────
@@ -5042,6 +5171,9 @@ export function shouldReinitChessViewFromSync(incoming) {
 
 // # Namespace Exports
 
+// Prefer these namespaces (or `import * as Module`) at new call sites.
+// Flat named exports remain for tests and gradual migration — do not add new flat aliases.
+
 // FEN / PGN / clipboard format validation and detection.
 export const ChessRules = Object.freeze({
   getFormat,
@@ -5055,6 +5187,9 @@ export const ChessRules = Object.freeze({
   fenPositionKey,
   chessContentSignature,
   normalizeFen,
+  lastMoveFromEnPassantTarget,
+  fenPieceColorAt,
+  fenBeforeEnPassantDoubleStep,
   START_FEN,
 })
 
@@ -5103,6 +5238,10 @@ export const PuzzlePool = Object.freeze({
   hasActivePuzzleFilters,
   formatPuzzleFiltersLabel,
   recordAdaptivePuzzleOutcome,
+  puzzleItemProgressFromText,
+  markPuzzleItemProgress,
+  academyProgressFromLocalPages,
+  resolveSmartAcademyNext,
 })
 
 // 7 · App session lifecycle controller helpers.
@@ -5112,9 +5251,17 @@ export const Session = Object.freeze({
   reduceChessSession,
   resolveChessViewMode,
   CHESS_VIEW,
+  SESSION_PHASE,
+  SESSION_ACTION,
   sessionHasReceivedInitialState,
   sessionBlocksAutosave,
+  sessionBlocksSounds,
+  sessionInSetup,
+  sessionShouldDeferNewGameSetup,
+  sessionShouldDeferStockfishSetup,
   sessionShouldReopenGameSetup,
+  sessionConsoleGeneration,
+  planChessShellPersist,
 })
 
 // 8 · postMessage contract + pure sync policy.
@@ -5123,7 +5270,15 @@ export const MsgSync = Object.freeze({
   createMessageDispatcher,
   evaluateGameSyncUpdate,
   shouldReinitChessViewFromSync,
+  preferRicherGameText,
+  gamePlyCount,
+  GAME_SYNC_SOURCE,
+  chessItemEmitKey,
+  shouldRespondWithPatchStateOnly,
   normalizeRealtimeState,
   setRealtimeSeat,
+  isRealtimeSeatReady,
+  isRealtimeSeatRtcConsented,
+  normalizeRealtimeSignal,
   normalizeRealtimeSignalMap,
 })

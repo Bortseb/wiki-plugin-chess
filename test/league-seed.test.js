@@ -339,16 +339,18 @@ describe('devtools · league-seed', () => {
   })
 
   describe('seed page.chess metadata', () => {
-    it('does not write gameIndex on My Chess Games (survey lists games by crawl)', () => {
+    it('writes gameIndex on My Chess Games (metadata catalog for crawls)', () => {
       const surveyPage = { title: 'My Chess Games', story: [{ type: 'chess', id: 's1', text: 'SURVEY' }], journal: [] }
       assert.equal(
         applyCompletedGameIndexToSurveyPage(surveyPage, 'frank.localhost:3001', [
           { slug: 'game-a', itemId: 'c1' },
           { slug: 'game-b', itemId: 'c2' },
         ]),
-        false,
+        true,
       )
-      assert.equal(surveyPage.chess?.gameIndex, undefined)
+      assert.equal(surveyPage.chess?.gameIndex?.completed?.length, 2)
+      assert.equal(surveyPage.chess.gameIndex.completed[0].slug, 'game-a')
+      assert.equal(surveyPage.chess.gameIndex.completed[0].host, 'frank.localhost:3001')
       assert.equal(
         surveyPage.journal.some(entry => entry.type === 'chess-charm'),
         false,

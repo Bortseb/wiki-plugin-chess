@@ -44,6 +44,7 @@ import {
   readPwaPageChromeStatus,
   clearPwaPageChromeStatus,
   rememberPopupState,
+  hydratePopupAuthFromSession,
 } from '../src/board-layout.js'
 import { MSG } from '../src/chess-core.js'
 
@@ -692,12 +693,38 @@ describe('app · board-layout', () => {
         chessState: pgn,
         itemId: 'abc123',
         mode: 'GAME',
+        pageOnThisWiki: true,
+        ownerCanJournalHere: true,
+        signedInDisplayName: 'Alice',
       })
       const key = 'WikiChess-ephemeral-key-abc123PopupState'
       assert.equal(store.has(key), true)
       assert.equal(store.has('WikiChess-playSnapshot-abc123'), false)
       const saved = JSON.parse(store.get(key))
       assert.equal(saved.PGN, pgn)
+      assert.equal(saved.pageOnThisWiki, true)
+      assert.equal(saved.ownerCanJournalHere, true)
+      assert.equal(saved.signedInDisplayName, 'Alice')
+      // Auth-only update (e.g. signed in on the CHOOSE menu) must not wipe the game.
+      rememberPopupState({
+        itemId: 'abc123',
+        pageKey: 'ephemeral-key',
+        pageOnThisWiki: true,
+        ownerCanJournalHere: true,
+        signedInDisplayName: 'Alice',
+        viewerAuthenticated: true,
+      })
+      const afterAuth = JSON.parse(store.get(key))
+      assert.equal(afterAuth.PGN, pgn)
+      assert.equal(afterAuth.viewerAuthenticated, true)
+
+      const hydrated = {}
+      assert.equal(hydratePopupAuthFromSession(hydrated), true)
+      assert.equal(hydrated.pageOnThisWiki, true)
+      assert.equal(hydrated.ownerCanJournalHere, true)
+      assert.equal(hydrated.signedInDisplayName, 'Alice')
+      // Already journaled — do not overwrite.
+      assert.equal(hydratePopupAuthFromSession({ pageOnThisWiki: true }), false)
     } finally {
       globalThis.localStorage = origLocal
       globalThis.sessionStorage = origSession

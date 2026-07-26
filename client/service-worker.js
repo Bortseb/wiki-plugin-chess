@@ -8,7 +8,7 @@
  * Freshness: wiki-server serves /plugins/chess/* with max-age=1h; this worker
  * uses cache:'no-store' so online PWAs pick up new builds (hop dials, etc.).
  */
-const CACHE_NAME = 'wiki-chess-pwa-cache-v92'
+const CACHE_NAME = 'wiki-chess-pwa-cache-v97'
 
 // Relative to this script URL (/plugins/chess/service-worker.js).
 const assetsToCache = [
@@ -49,6 +49,12 @@ function isManifestRequest(url) {
   return /\/manifest\.(?:json|webmanifest)$/.test(url.pathname)
 }
 
+// Auth + journal bridge must hit the wiki origin directly — a SW network blip
+// would otherwise surface as a locked padlock / yellow-halo flash on mobile focus.
+function isPwaBridgeRequest(url) {
+  return /\/plugin\/chess\/pwa(?:\/|$)/.test(url.pathname)
+}
+
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE_NAME).then(cache =>
@@ -75,7 +81,7 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url)
-  if (isManifestRequest(url)) {
+  if (isManifestRequest(url) || isPwaBridgeRequest(url)) {
     event.respondWith(fetch(event.request))
     return
   }

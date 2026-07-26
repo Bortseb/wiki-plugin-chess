@@ -7,34 +7,17 @@
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <meta name="theme-color" content="#99DAFF" />
     <link rel="manifest" href="/plugins/chess/manifest.json" id="wiki-chess-manifest" />
+    <!-- 192/512 first: Android Chrome needs ≥192 when the install manifest is missing or stale. -->
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" id="wiki-chess-favicon-192" />
+    <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png" id="wiki-chess-favicon-512" />
     <link rel="icon" href="icon-120.png" id="wiki-chess-favicon" />
+    <link rel="apple-touch-icon" href="icon-180.png" id="wiki-chess-apple-touch-icon" />
     <script>
-      // Apply saved Bootstrap color mode before paint (FOUC). chess-app.js owns the toggle.
+      // Apply system Bootstrap color mode before paint (FOUC). Explicit light/dark
+      // preferences live in IndexedDB and are applied once chess-app.js hydrates.
       ;(function () {
-        var key = 'wiki-chess-color-theme'
         var pref = 'auto'
-        try {
-          var raw = localStorage.getItem(key)
-          if (raw != null) {
-            try {
-              pref = JSON.parse(raw)
-            } catch (_) {
-              pref = raw
-            }
-          }
-        } catch (_) {
-          /* private mode */
-        }
-        pref = String(pref || 'auto')
-          .trim()
-          .toLowerCase()
-        if (pref !== 'light' && pref !== 'dark' && pref !== 'auto') pref = 'auto'
-        var resolved =
-          pref === 'light' || pref === 'dark'
-            ? pref
-            : window.matchMedia('(prefers-color-scheme: dark)').matches
-              ? 'dark'
-              : 'light'
+        var resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
         document.documentElement.setAttribute('data-bs-theme', resolved)
         document.documentElement.setAttribute('data-wiki-color-theme', pref)
         var meta = document.querySelector('meta[name="theme-color"]')
@@ -108,8 +91,14 @@
       }
     </style>
     <link rel="stylesheet" href="./assets/styles/all.min.css" />
-    <link rel="stylesheet" href="./assets/styles/cm-modules.css?v=1.1.2-pre.15+1784363678514" />
-    <link rel="stylesheet" href="./assets/styles/wiki-chess.css?v=1.1.2-pre.15+1784363678514" />
+    <link rel="stylesheet" href="./assets/styles/cm-modules.css?v=1.1.2-pre.16+1785042813718" />
+    <link rel="stylesheet" href="./assets/styles/wiki-chess.css?v=1.1.2-pre.16+1785042813718" />
+    <!-- Warm the app + board bundles in parallel: the browser would otherwise not
+       discover cm-modules-bundle.js until chess-app.js is downloaded and parsed
+       (a serial round-trip that is very visible on mobile). Hrefs must match the
+       stamped import specifier in chess-app.js — build-client.js re-stamps ?v=. -->
+    <link rel="modulepreload" href="./chess-app.js?v=1.1.2-pre.16+1785042813718" />
+    <link rel="modulepreload" href="./cm-modules-bundle.js?v=1.1.2-pre.16+1785042813718" />
     <script type="module">
       // Early PWA boot: protocol guard and install nudge (standalone shell only).
       if (window.parent === window.self) {
@@ -141,14 +130,7 @@
         if (navigating) {
           /* page is reloading — skip install nudge */
         } else {
-          try {
-            const installNudge = document.querySelector('#install-nudge')
-            if (installNudge && localStorage.getItem('wiki-chess-pwa-installed:' + location.origin) === 'true') {
-              installNudge.style.display = 'none'
-            }
-          } catch {
-            /* localStorage can be unavailable */
-          }
+          /* Install nudge visibility is owned by board-layout after IndexedDB prefs hydrate. */
 
           if (screen.orientation) {
             function showOrientationBlocks() {
@@ -200,9 +182,18 @@
     <!-- PWA install nudge: browser chrome only (address-bar icon or ⋮ menu). Hidden once installed. -->
     <div id="install-nudge" class="wiki-chess-install-nudge" role="status" aria-live="polite">
       <div class="wiki-chess-install-nudge-inner">
+        <img
+          id="wiki-chess-install-flag-preview"
+          class="wiki-chess-install-flag-preview"
+          src="/favicon.png"
+          width="48"
+          height="48"
+          alt="This wiki's flag — used as the app icon when large enough"
+          decoding="async" />
         <p class="wiki-chess-install-nudge-text mb-0">
-          Install <strong>Federated Wiki Chess</strong> for offline play. Use the install icon in the address bar, or
-          <strong>Install</strong> in the browser menu (⋮).
+          Install <strong>Federated Wiki Chess</strong> for offline play. The flag shown here is this wiki's
+          favicon — install uses it as the app icon when it is at least 192×192; otherwise the chess icon is
+          used. Use the install icon in the address bar, or <strong>Install</strong> in the browser menu (⋮).
         </p>
       </div>
       <button
@@ -342,8 +333,10 @@
                       type="button"
                       class="btn btn-sm btn-outline-primary wiki-chess-annotation-add"
                       id="addCommentBtn"
-                      title="Add a comment to the selected move">
-                      <i class="fas fa-comment-dots fa-fw" aria-hidden="true"></i> Add Comment
+                      title="Add Comment"
+                      aria-label="Add Comment">
+                      <i class="fas fa-comment-medical fa-fw" aria-hidden="true"></i>
+                      <span class="wiki-chess-annotation-add-label">Add Comment</span>
                     </button>
                   </div>
                 </div>
@@ -374,11 +367,8 @@
               </div>
               <div class="chess-console-right col-xl-3 order-xl-3 col-lg-4 order-lg-2 col-md-8 order-md-3">
                 <!-- Collapsible game panel: history, captures, action buttons, settings,
-                   attributions. The header always reads "Controls:" (sitting over the move
-                   history when expanded; nested Game settings / Attributions chevrons
-                   indent under it). Collapsed, the captured pieces strip appears
-                   right-aligned with its "Captured Pieces" heading above the piece rows,
-                   mirroring the expanded panel. -->
+                   attributions. Expanded: "Controls:" over the move history. Collapsed:
+                   the Captured Pieces strip on top with "Controls:" below it. -->
                 <details class="wiki-chess-drawer wiki-chess-history-drawer wiki-chess-game-controls-drawer" open>
                   <summary>
                     <span class="wiki-chess-game-controls-summary-label">Controls:</span>
@@ -408,30 +398,8 @@
                     <div class="wiki-chess-below-chrome">
                       <div class="wiki-chess-footer">
               <div class="wiki-chess-actions">
+                <!-- Game-specific actions first (resign, copy, share); navigation last. -->
                 <div class="wiki-chess-nav-actions d-none">
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
-                    id="wikiChessMyGamesNav"
-                    title="Open your My Chess Games page in the wiki">
-                    <i class="fas fa-list fa-fw" aria-hidden="true"></i> My Chess Games
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
-                    id="chooseModeBtn"
-                    title="Return to the game mode menu">
-                    <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
-                    id="editPositionBtn"
-                    title="Open the position editor for the current board">
-                    <i class="fas fa-pen fa-fw" aria-hidden="true"></i> Edit This Position
-                  </button>
-                  <!-- Resign the live game: only shown for an in-progress game the local player
-               holds a seat in (toggled by updateResignControl). Opens a confirm modal. -->
                   <button
                     type="button"
                     class="btn btn-sm btn-outline-danger wiki-chess-action-btn d-none"
@@ -463,6 +431,22 @@
                     id="shareGamePgnBtn"
                     title="Share game PGN">
                     <i class="fas fa-share-alt fa-fw" aria-hidden="true"></i> Share PGN
+                  </button>
+                </div>
+                <div class="wiki-chess-nav-actions d-none">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn d-none"
+                    id="wikiChessMyGamesNav"
+                    title="Open your My Chess Games page in the wiki">
+                    <i class="fas fa-list fa-fw" aria-hidden="true"></i> My Chess Games
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                    id="chooseModeBtn"
+                    title="Return to the game mode menu">
+                    <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
                   </button>
                 </div>
               </div>
@@ -544,8 +528,7 @@
                   <div class="form-check mb-0 mt-2">
                     <input class="form-check-input" type="checkbox" id="settingEnableComments" />
                     <label class="form-check-label" for="settingEnableComments"
-                      >Enable move comments (show annotations below the board; add notes when signed in on your
-                      wiki)</label
+                      >Allow adding comments</label
                     >
                   </div>
                   <div class="wiki-chess-piece-set-picker mt-3">
@@ -562,7 +545,7 @@
                   </div>
                 </div>
               </details>
-              <details class="wiki-chess-drawer wiki-chess-thanks" open>
+              <details class="wiki-chess-drawer wiki-chess-thanks">
                 <summary>Attributions and Thanks</summary>
                 <div class="wiki-chess-thanks-body">
                   <p class="wiki-chess-thanks-intro">
@@ -1060,10 +1043,12 @@
           <p id="puzzle-status" class="wiki-puzzle-status mt-0 mb-2" role="status" tabindex="-1"></p>
           <p id="puzzle-solution" class="wiki-puzzle-solution mb-2" hidden></p>
           <div class="wiki-puzzle-controls">
-            <button type="button" class="btn btn-sm btn-primary wiki-chess-action-btn" id="puzzleNextBtn">
-              <i class="fas fa-forward fa-fw" aria-hidden="true"></i> New Puzzle
-            </button>
-            <button type="button" class="btn btn-sm btn-outline-primary wiki-chess-action-btn" id="puzzleRetryBtn">
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleRetryBtn"
+              disabled
+              title="Retry becomes available after a failed attempt">
               <i class="fas fa-undo fa-fw" aria-hidden="true"></i> Retry
             </button>
             <button
@@ -1073,20 +1058,8 @@
               title="Show the solution for this puzzle">
               <i class="fas fa-eye fa-fw" aria-hidden="true"></i> Reveal Solution
             </button>
-            <button
-              type="button"
-              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
-              id="puzzleEditFiltersBtn"
-              title="Choose which puzzles to draw from (rating, popularity); the choice is saved into the item">
-              <i class="fas fa-sliders-h fa-fw" aria-hidden="true"></i> Edit Filters
-            </button>
-            <button
-              type="button"
-              class="btn btn-sm btn-outline-success wiki-chess-action-btn"
-              id="puzzleTrainingLogBtn"
-              title="Opt in: save this solve to your private training log (and certify on your fork if you own this page)"
-              hidden>
-              <i class="fas fa-certificate fa-fw" aria-hidden="true"></i> Add to My Training Log
+            <button type="button" class="btn btn-sm btn-primary wiki-chess-action-btn" id="puzzleNextBtn">
+              <i class="fas fa-forward fa-fw" aria-hidden="true"></i> New Puzzle
             </button>
             <button
               type="button"
@@ -1095,6 +1068,13 @@
               title="Save this exact puzzle into the item so it always loads (instead of a random one)"
               hidden>
               <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save This Puzzle
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+              id="puzzleEditFiltersBtn"
+              title="Choose which puzzles to draw from (rating, popularity); the choice is saved into the item">
+              <i class="fas fa-sliders-h fa-fw" aria-hidden="true"></i> Edit Puzzle Filters
             </button>
             <button
               type="button"
@@ -1125,7 +1105,7 @@
               hidden
               aria-live="polite"></p>
           </div>
-          <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-1" open hidden>
+          <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-1" hidden>
             <summary>Board settings</summary>
             <div class="wiki-chess-board-settings-body">
               <div class="wiki-chess-piece-set-picker">
@@ -1144,7 +1124,7 @@
               </div>
             </div>
           </details>
-          <details class="wiki-chess-drawer wiki-chess-thanks mt-2" open>
+          <details class="wiki-chess-drawer wiki-chess-thanks mt-2">
             <summary>Attributions and Thanks</summary>
             <div class="wiki-chess-thanks-body">
               <p class="wiki-puzzle-attribution text-muted mt-0 mb-2">
@@ -1638,17 +1618,17 @@
               <button
                 type="button"
                 class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
-                id="positionCreatePuzzleBtn"
-                title="Record a solution line from this position and save it as a puzzle">
-                <i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i> Create Puzzle
-              </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
                 id="positionSaveToWikiBtn"
                 title="Save this position to the wiki page"
                 hidden>
                 <i class="fas fa-save fa-fw" aria-hidden="true"></i> Save Position to Wiki
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-outline-primary wiki-chess-action-btn"
+                id="positionCreatePuzzleBtn"
+                title="Record a solution line from this position and save it as a puzzle">
+                <i class="fas fa-puzzle-piece fa-fw" aria-hidden="true"></i> Create Puzzle
               </button>
               <button
                 type="button"
@@ -1665,7 +1645,7 @@
                 <i class="fas fa-exchange-alt fa-fw" aria-hidden="true"></i> Switch Game Mode
               </button>
             </div>
-            <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-2" open hidden>
+            <details class="wiki-chess-drawer wiki-chess-board-settings-drawer mt-2" hidden>
               <summary>Board settings</summary>
               <div class="wiki-chess-board-settings-body">
                 <div class="wiki-chess-piece-set-picker">
@@ -1684,7 +1664,7 @@
                 </div>
               </div>
             </details>
-            <details class="wiki-chess-drawer wiki-chess-thanks" open>
+            <details class="wiki-chess-drawer wiki-chess-thanks">
               <summary>Attributions and Thanks</summary>
               <div class="wiki-chess-thanks-body">
                 <p class="wiki-chess-thanks-intro">
@@ -2048,19 +2028,31 @@
                   class="wiki-chess-lb-modes btn-group btn-group-sm"
                   role="group"
                   aria-labelledby="wikiChessLbViewLabel"
+                  aria-orientation="horizontal"
                   id="wikiChessLbModes">
-                  <button type="button" class="btn btn-outline-primary" data-lb-reach="mine" aria-pressed="true">
-                    Past opponents
+                  <button
+                    type="button"
+                    class="btn btn-outline-primary active"
+                    data-lb-reach="mine"
+                    aria-pressed="true"
+                    title="Show players you have played">
+                    Past Opponents
                   </button>
                   <button
                     type="button"
                     class="btn btn-outline-primary"
                     data-lb-reach="neighborhood"
-                    aria-pressed="false">
+                    aria-pressed="false"
+                    title="Show your wiki neighborhood">
                     Neighborhood
                   </button>
-                  <button type="button" class="btn btn-outline-primary" data-lb-reach="survey" aria-pressed="false">
-                    Visible federation
+                  <button
+                    type="button"
+                    class="btn btn-outline-primary"
+                    data-lb-reach="survey"
+                    aria-pressed="false"
+                    title="Show the visible federation crawl">
+                    Visible Federation
                   </button>
                 </div>
               </div>
@@ -2073,47 +2065,53 @@
             </label>
           </div>
           <div class="wiki-chess-lb-hop-graph" id="wikiChessLbHopGraph" hidden>
-            <div class="wiki-chess-lb-hop-graph-top">
-              <p class="wiki-chess-lb-filter-label mb-0" id="wikiChessLbHopGraphLabel">Visible federation reach</p>
-              <div class="wiki-chess-lb-hop-blocked" id="wikiChessLbHopBlocked" aria-live="polite">
-                <span class="wiki-chess-lb-hop-blocked-count" id="wikiChessLbHopBlockedCount">0</span>
-                <span class="wiki-chess-lb-hop-blocked-label">sites blocked</span>
+            <!-- Collapsed by default — dials stay at max hops 3 / decay 0.80 until opened. -->
+            <details class="wiki-chess-lb-hop-details">
+              <summary class="wiki-chess-lb-hop-details-summary">
+                <span class="wiki-chess-lb-hop-details-title" id="wikiChessLbHopGraphLabel">Visible federation reach</span>
+                <span class="wiki-chess-lb-hop-details-meta" id="wikiChessLbHopDetailsMeta">max hops 3 · decay 0.80</span>
+                <span class="wiki-chess-lb-hop-blocked" id="wikiChessLbHopBlocked" aria-live="polite">
+                  <span class="wiki-chess-lb-hop-blocked-count" id="wikiChessLbHopBlockedCount">0</span>
+                  <span class="wiki-chess-lb-hop-blocked-label">sites blocked</span>
+                </span>
+              </summary>
+              <div class="wiki-chess-lb-hop-details-body">
+                <div class="wiki-chess-lb-hop-controls" role="group" aria-labelledby="wikiChessLbHopGraphLabel">
+                  <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-hops-field" for="wikiChessLbMaxHops">
+                    <span class="wiki-chess-lb-hop-decay-head">
+                      Max hops
+                      <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbMaxHopsValue">3</span>
+                    </span>
+                    <input
+                      type="range"
+                      class="form-range"
+                      id="wikiChessLbMaxHops"
+                      min="1"
+                      max="12"
+                      step="1"
+                      value="3"
+                      aria-valuetext="3" />
+                  </label>
+                  <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-decay-field" for="wikiChessLbHopDecay">
+                    <span class="wiki-chess-lb-hop-decay-head">
+                      Decay
+                      <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbHopDecayValue">0.80</span>
+                    </span>
+                    <input
+                      type="range"
+                      class="form-range"
+                      id="wikiChessLbHopDecay"
+                      min="0.5"
+                      max="1"
+                      step="0.05"
+                      value="0.8"
+                      aria-valuetext="0.80" />
+                  </label>
+                </div>
+                <p class="wiki-chess-lb-hop-preview text-muted small mb-1" id="wikiChessLbHopPreview"></p>
+                <p class="wiki-chess-lb-hop-stats small mb-0" id="wikiChessLbHopStats"></p>
               </div>
-            </div>
-            <div class="wiki-chess-lb-hop-controls" role="group" aria-labelledby="wikiChessLbHopGraphLabel">
-              <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-hops-field" for="wikiChessLbMaxHops">
-                <span class="wiki-chess-lb-hop-decay-head">
-                  Max hops
-                  <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbMaxHopsValue">3</span>
-                </span>
-                <input
-                  type="range"
-                  class="form-range"
-                  id="wikiChessLbMaxHops"
-                  min="1"
-                  max="12"
-                  step="1"
-                  value="3"
-                  aria-valuetext="3" />
-              </label>
-              <label class="wiki-chess-lb-hop-field wiki-chess-lb-hop-decay-field" for="wikiChessLbHopDecay">
-                <span class="wiki-chess-lb-hop-decay-head">
-                  Decay
-                  <span class="wiki-chess-lb-hop-decay-value" id="wikiChessLbHopDecayValue">0.80</span>
-                </span>
-                <input
-                  type="range"
-                  class="form-range"
-                  id="wikiChessLbHopDecay"
-                  min="0.5"
-                  max="1"
-                  step="0.05"
-                  value="0.8"
-                  aria-valuetext="0.80" />
-              </label>
-            </div>
-            <p class="wiki-chess-lb-hop-preview text-muted small mb-1" id="wikiChessLbHopPreview"></p>
-            <p class="wiki-chess-lb-hop-stats small mb-0" id="wikiChessLbHopStats"></p>
+            </details>
           </div>
           <button
             type="button"
@@ -2451,9 +2449,15 @@
                   autocomplete="off" />
               </div>
             </div>
+            <div class="mb-3 form-check" id="positionChallengeAllowGuestsWrap">
+              <input class="form-check-input" type="checkbox" id="positionChallengeAllowGuests" checked />
+              <label class="form-check-label" for="positionChallengeAllowGuests">
+                Allow unauthenticated guests to join
+              </label>
+            </div>
             <p class="small text-muted mb-0">
               Leave a rating blank for no limit. Opponents whose rating falls outside the range can view the game but
-              can't join.
+              can't join. Rated challenges are always wiki-owners only (guests cannot join).
             </p>
           </div>
           <p class="small text-muted mb-0 wiki-fen-human-hint" id="positionHumanHint" hidden></p>
@@ -2484,6 +2488,6 @@
     <script src="./assets/js/jquery-3.3.1.slim.min.js"></script>
     <script src="./assets/js/bootstrap-auto-dark-mode.js"></script>
     <script src="./assets/js/es-module-shims.min.js"></script>
-    <script type="module" src="./chess-app.js?v=1.1.2-pre.15+1784363678514"></script>
+    <script type="module" src="./chess-app.js?v=1.1.2-pre.16+1785042813718"></script>
   </body>
 </html>

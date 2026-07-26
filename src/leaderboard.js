@@ -329,7 +329,7 @@ function scheduleFederationHopGraphRecrawl() {
       return
     }
     lbBoardCache.survey = null
-    requestBoard({ force: true, deepRecompute: false, syncSurvey: true })
+    requestBoard({ force: true, restart: true, deepRecompute: false, syncSurvey: true })
   }, HOP_GRAPH_RECRAWL_DEBOUNCE_MS)
   renderHopGraphPanel()
 }
@@ -379,6 +379,17 @@ function syncHopGraphInputs() {
   if (hopsValueEl) hopsValueEl.textContent = String(graph.maxHops)
   if (decayEl) decayEl.setAttribute('aria-valuetext', graph.hopDecay.toFixed(2))
   if (decayValueEl) decayValueEl.textContent = graph.hopDecay.toFixed(2)
+  syncHopDetailsMeta(graph)
+}
+
+function formatHopDetailsMeta(graph) {
+  const g = normalizeNeighborhoodGraphOpts(graph || {})
+  return `max hops ${g.maxHops} · decay ${g.hopDecay.toFixed(2)}`
+}
+
+function syncHopDetailsMeta(graph) {
+  const meta = el('wikiChessLbHopDetailsMeta')
+  if (meta) meta.textContent = formatHopDetailsMeta(graph)
 }
 
 function renderHopGraphPanel() {
@@ -398,9 +409,10 @@ function renderHopGraphPanel() {
   // re-sync from IndexedDB ~4×/s and fight the pointer.
   const dialBusy = isHopGraphDialInteracting()
   if (!dialBusy) syncHopGraphInputs()
+  const graph = dialBusy ? readLiveHopGraphFromInputs() : readNeighborhoodHopGraph()
+  syncHopDetailsMeta(graph)
   const preview = el('wikiChessLbHopPreview')
   if (preview) {
-    const graph = dialBusy ? readLiveHopGraphFromInputs() : readNeighborhoodHopGraph()
     let text = formatHopTrustPreview(graph)
     if (hopGraphRecrawlTimer != null) text += ' · recrawl shortly…'
     preview.textContent = text
@@ -462,6 +474,7 @@ function wireHopGraphDials() {
     if (hopsValueEl) hopsValueEl.textContent = String(graph.maxHops)
     if (decayEl) decayEl.setAttribute('aria-valuetext', graph.hopDecay.toFixed(2))
     if (decayValueEl) decayValueEl.textContent = graph.hopDecay.toFixed(2)
+    syncHopDetailsMeta(graph)
     const preview = el('wikiChessLbHopPreview')
     if (preview) preview.textContent = formatHopTrustPreview(graph)
   }
@@ -537,6 +550,7 @@ function addPastOpponentsToNeighborhood() {
   // has not finished registering yet (postMessage ordering vs BUILD_LEADERBOARD).
   requestBoard({
     force: true,
+    restart: true,
     deepRecompute: false,
     syncSurvey: false,
     extraNeighborhoodSites: hosts,
@@ -908,9 +922,19 @@ function lbTableHeightForRows(wrap, rows) {
   return Math.round(lbTableStridePx(wrap) * rows + lbTableHeadPx(wrap))
 }
 
+// Floor height: prefer ~3 rows, but never force empty space under a shorter table
+// (first drag used to clamp a 1-row board up to 3 rows and lock that as the new min).
+function lbTableMinHeight(wrap) {
+  const oneRow = lbTableHeightForRows(wrap, 1)
+  const preferred = lbTableHeightForRows(wrap, LB_TABLE_MIN_ROWS)
+  const contentH = measureLeaderboardTableContentHeight(wrap)
+  if (!contentH || contentH < 1) return oneRow
+  return Math.max(oneRow, Math.min(preferred, contentH))
+}
+
 function setLeaderboardTableHeight(wrap, heightPx, { notify = true, animate = false, maxPx = null } = {}) {
   if (!wrap) return
-  const minH = lbTableHeightForRows(wrap, LB_TABLE_MIN_ROWS)
+  const minH = lbTableMinHeight(wrap)
   const maxH = Number.isFinite(maxPx) && maxPx > 0 ? maxPx : lbTableHeightForRows(wrap, LB_TABLE_MAX_ROWS)
   const next = Math.max(minH, Math.min(maxH, Math.round(heightPx)))
   wrap.classList.toggle('is-window-fitting', Boolean(animate))
@@ -975,8 +999,11 @@ function fitLeaderboardTableToWindow({ animate = true } = {}) {
   const available = Math.floor(window.innerHeight - top - leaderboardTableBottomReserve())
   if (!Number.isFinite(available) || available < 1) return
 
+  // After the user dragged the handle, keep their height — window-fit must not re-expand.
+  if (wrap.classList.contains('is-manually-sized')) return
+
   const contentH = measureLeaderboardTableContentHeight(wrap)
-  const minH = lbTableHeightForRows(wrap, LB_TABLE_MIN_ROWS)
+  const minH = lbTableMinHeight(wrap)
   // If the table is wider than the wrap, a horizontal bar will consume height — reserve it
   // so the last row is never hidden under that bar.
   const table = wrap.querySelector('table.wiki-chess-lb-table')
@@ -991,6 +1018,8 @@ function fitLeaderboardTableToWindow({ animate = true } = {}) {
     animate,
     maxPx: Math.max(available, lbTableHeightForRows(wrap, LB_TABLE_MAX_ROWS)),
   })
+  // Window-fit is automatic sizing — clear the manual flag setLeaderboardTableHeight adds.
+  wrap.classList.remove('is-manually-sized')
 }
 
 let lbWindowFitTimer = null
@@ -1010,7 +1039,7 @@ function wireLeaderboardTableResize() {
   const wrap = el('wikiChessLbTableWrap')
   if (!handle || !wrap || handle.dataset.lbResizeWired === '1') return
   handle.dataset.lbResizeWired = '1'
-  const minH = () => lbTableHeightForRows(wrap, LB_TABLE_MIN_ROWS)
+  const minH = () => lbTableMinHeight(wrap)
   const maxH = () => lbTableHeightForRows(wrap, LB_TABLE_MAX_ROWS)
   const defaultH = () => lbTableHeightForRows(wrap, LB_TABLE_DEFAULT_ROWS)
   handle.setAttribute('aria-valuemin', String(minH()))
@@ -1042,9 +1071,8 @@ function wireLeaderboardTableResize() {
     e.preventDefault()
     wrap.classList.remove('is-window-fitting')
     wrap.dataset.lbResizeDragging = '1'
-    const startHeight = wrap.classList.contains('is-manually-sized')
-      ? wrap.getBoundingClientRect().height
-      : Math.min(wrap.scrollHeight, wrap.clientHeight || defaultH())
+    // Visible viewport only — do not jump up to the 3-row preferred floor on first grab.
+    const startHeight = wrap.getBoundingClientRect().height || Math.min(wrap.scrollHeight, defaultH())
     // Lock current viewport height before dragging so max-height alone does not fight us.
     if (!wrap.classList.contains('is-manually-sized')) {
       setLeaderboardTableHeight(wrap, startHeight, { notify: false, animate: false })

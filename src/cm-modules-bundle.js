@@ -261,14 +261,16 @@ export class WikiHistory {
         const markWhite = moveWhite ? this.commentMarker(this.moveCommentText(moveWhite)) : ''
         const markBlack = moveBlack ? this.commentMarker(this.moveCommentText(moveBlack)) : ''
 
+        // .wiki-ply-san keeps figurine + SAN on one line; the cell itself may wrap
+        // (only the comment marker breaks) so the list never scrolls horizontally.
         rows.push(html`
           <tr>
             <td class="num">${moveNumber}.</td>
             <td data-ply="${whitePly}" class="ply ${this.getPlyClass(whitePly)} ply${whitePly}">
-              ${sanWhite}${markWhite}
+              <span class="wiki-ply-san">${sanWhite}</span>${markWhite}
             </td>
             <td data-ply="${blackPly}" class="ply ${this.getPlyClass(blackPly)} ply${blackPly}">
-              ${sanBlack}${markBlack}
+              <span class="wiki-ply-san">${sanBlack}</span>${markBlack}
             </td>
           </tr>
         `)
@@ -301,12 +303,30 @@ export class WikiHistory {
 
 // # Wiki Captured Pieces
 
-function stauntyPieceMarkup(spriteUrl, pieceCaptured, colorChar, ply, size) {
+function stauntyPieceMarkup(spriteUrl, pieceCaptured, colorChar, ply, size, count = 1) {
   const pieceHtml = stauntyPieceSvg(spriteUrl, colorChar, pieceCaptured, size, {
     className: 'wiki-captured-piece-svg',
     wrapClass: 'wiki-captured-piece-sprite',
   })
-  return `<span class="piece wiki-captured-piece" role="button" data-ply="${ply}">${pieceHtml}</span>`
+  const badge = count > 1 ? `<span class="wiki-captured-count">${count}</span>` : ''
+  return `<span class="piece wiki-captured-piece" role="button" data-ply="${ply}">${pieceHtml}${badge}</span>`
+}
+
+// Collapse a list of captures ({piece, ply}) into one entry per piece type, keeping
+// first-capture order and the LAST ply of each type (so clicking a stack jumps to the
+// most recent capture of that piece). Keeps the strip bounded: at most 5 tiles per row.
+function groupCaptures(captures) {
+  const groups = new Map()
+  for (const { piece, ply } of captures) {
+    const group = groups.get(piece)
+    if (group) {
+      group.count += 1
+      group.ply = ply
+    } else {
+      groups.set(piece, { piece, ply, count: 1 })
+    }
+  }
+  return [...groups.values()]
 }
 
 export class WikiCapturedPieces extends CapturedPieces {
@@ -352,10 +372,10 @@ export class WikiCapturedPieces extends CapturedPieces {
   redraw() {
     window.clearTimeout(this.redrawDebounce)
     this.redrawDebounce = setTimeout(() => {
-      const capturedPiecesWhite = []
-      const capturedPiecesWhiteAfterPlyViewed = []
-      const capturedPiecesBlack = []
-      const capturedPiecesBlackAfterPlyViewed = []
+      const capturesWhite = []
+      const capturesWhiteAfterPlyViewed = []
+      const capturesBlack = []
+      const capturesBlackAfterPlyViewed = []
 
       const history = this.chessConsole.state.chess.history({ verbose: true })
       let pointsWhite = 0
@@ -363,27 +383,38 @@ export class WikiCapturedPieces extends CapturedPieces {
       history.forEach((move, index) => {
         if (move.flags.indexOf('c') !== -1 || move.flags.indexOf('e') !== -1) {
           const pieceCaptured = move.captured.toUpperCase()
+          const capture = { piece: pieceCaptured, ply: move.ply }
           if (move.color === 'b') {
-            const pieceHtml = stauntyPieceMarkup(this.spriteUrl, pieceCaptured, 'w', move.ply, this.pieceSize)
             if (index < this.chessConsole.state.plyViewed) {
-              capturedPiecesWhite.push(pieceHtml)
+              capturesWhite.push(capture)
             } else {
-              capturedPiecesWhiteAfterPlyViewed.push(pieceHtml)
+              capturesWhiteAfterPlyViewed.push(capture)
             }
             pointsWhite += PIECES[pieceCaptured.toLowerCase()].value
           } else if (move.color === 'w') {
-            const pieceHtml = stauntyPieceMarkup(this.spriteUrl, pieceCaptured, 'b', move.ply, this.pieceSize)
             if (index < this.chessConsole.state.plyViewed) {
-              capturedPiecesBlack.push(pieceHtml)
+              capturesBlack.push(capture)
             } else {
-              capturedPiecesBlackAfterPlyViewed.push(pieceHtml)
+              capturesBlackAfterPlyViewed.push(capture)
             }
             pointsBlack += PIECES[pieceCaptured.toLowerCase()].value
           }
         }
       })
-      const outputWhite = this.renderPieces(capturedPiecesWhite, capturedPiecesWhiteAfterPlyViewed, pointsWhite)
-      const outputBlack = this.renderPieces(capturedPiecesBlack, capturedPiecesBlackAfterPlyViewed, pointsBlack)
+      const renderGrouped = (captures, colorChar) =>
+        groupCaptures(captures).map(({ piece, ply, count }) =>
+          stauntyPieceMarkup(this.spriteUrl, piece, colorChar, ply, this.pieceSize, count),
+        )
+      const outputWhite = this.renderPieces(
+        renderGrouped(capturesWhite, 'w'),
+        renderGrouped(capturesWhiteAfterPlyViewed, 'w'),
+        pointsWhite,
+      )
+      const outputBlack = this.renderPieces(
+        renderGrouped(capturesBlack, 'b'),
+        renderGrouped(capturesBlackAfterPlyViewed, 'b'),
+        pointsBlack,
+      )
       const rows = this.chessConsole.state.orientation === 'w' ? outputWhite + outputBlack : outputBlack + outputWhite
       this.element.innerHTML = `<h3 class="wiki-captured-heading">${this.i18n.t('captured_pieces')}</h3>` + rows
       // The game panel's collapsed "captured pieces" summary mirrors captures

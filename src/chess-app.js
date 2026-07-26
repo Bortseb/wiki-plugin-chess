@@ -52,7 +52,6 @@ import {
   normalizeRestoredChessSession,
   playerDisplayLabel,
   stripSelfChallengeTarget,
-  GUEST_PLAYER_NAME,
   guestSeatName,
   START_FEN,
   parseChessItem,
@@ -62,11 +61,9 @@ import {
   siteGameSettingDefaults,
   pgnGameSettingDefaults,
   PIECE_SETS,
-  PIECE_SET_STORAGE_KEY,
   DEFAULT_PIECE_SET_ID,
   normalizePieceSetId,
   getPieceSetById,
-  COLOR_THEME_STORAGE_KEY,
   DEFAULT_COLOR_THEME_ID,
   normalizeColorThemeId,
   nextColorThemeId,
@@ -76,20 +73,14 @@ import {
   resolveSignedInUsername,
   escapeHtml,
   buildCreatePreviewMeta,
-  shouldPersistChessItemText,
-  CHESS_VIEW,
-  createChessSessionController,
-  resolveChessViewMode,
   isMaintenanceChessState,
   isMaintenanceChessItemText,
-  sessionShouldDeferStockfishSetup,
-  sessionHasReceivedInitialState,
-  sessionBlocksAutosave,
-  sessionShouldReopenGameSetup,
-  createMessageDispatcher,
   localSessionUiPolicy,
   pwaMatchesLinkedWikiTab,
   MSG,
+  Session,
+  MsgSync,
+  Journal,
 } from './chess-core.js'
 import {
   isReplaceableGhostPageTitle,
@@ -104,7 +95,7 @@ import {
 import { openConfirmModal, closeActiveModal, restoreEmbeddedMount, WIKI_AUTH_REQUIRED_TITLE } from './modals.js'
 export { confirmSwitchGameModeFromEditor } from './choose-menu.js'
 
-const chessSession = createChessSessionController({ onFollowPopupChange: Realtime.syncFollowsPopup })
+const chessSession = Session.createChessSessionController({ onFollowPopupChange: Realtime.syncFollowsPopup })
 
 const sessionFollowsPopup = () => chessSession.followsPopup()
 const setSessionFollowsPopup = followsPopup => chessSession.setFollowsPopup(followsPopup)
@@ -268,6 +259,8 @@ Game.initGame({
   showErrorPage,
   wireStartMenu,
   loadLocalSettingPrefs,
+  getUiPref,
+  setUiPref,
   replaceChessState,
   ownRatingValue: Survey.ownRatingValue,
   applySyncedPosition: Realtime.applySyncedPosition,
@@ -310,6 +303,7 @@ function buildSurveyUiApp() {
     ownRatingValue: Survey.ownRatingValue,
     ownGamesPlayed: Survey.ownGamesPlayed,
     canPublish: () => Boolean(chessState()?.ownerCanJournalHere || chessState()?.pageOnThisWiki),
+    isAuthenticatedOwner: () => Boolean(viewerCanJournalAsOwner()),
     pwaAuthGateTitle,
     startOpenChallengeSetup,
     createChooseMenuGhostPage(onFailure) {
@@ -446,8 +440,8 @@ Puzzle.initPuzzleMode({
   },
   canPublish: () => Boolean(chessState()?.ownerCanJournalHere || chessState()?.pageOnThisWiki),
   pwaAuthGateTitle,
-  localPuzzleDownloadEnabled: Puzzle.isLocalPuzzleDownloadOptIn,
-  setLocalPuzzleDownloadEnabled: Puzzle.setLocalPuzzleDownloadOptIn,
+  localPuzzleDownloadEnabled: () => Boolean(getUiPref('localPuzzleDownload')),
+  setLocalPuzzleDownloadEnabled: enabled => setUiPref('localPuzzleDownload', Boolean(enabled)),
   get isWikiEmbed() {
     return isWikiEmbed
   },
@@ -506,6 +500,18 @@ BoardLayout.initBoardLayout({
   hideAppLoadingScreen,
 })
 
+BoardLayout.initUiPrefsBridge({
+  isPwaInstalled: origin => Boolean(uiPrefsCache.pwaInstalledOrigins?.[origin || location.origin]),
+  markPwaInstalled: origin => {
+    const key = origin || location.origin
+    patchUiPrefs({
+      pwaInstalledOrigins: { ...(uiPrefsCache.pwaInstalledOrigins || {}), [key]: true },
+    })
+  },
+  isHideInstallNudge: () => Boolean(uiPrefsCache.hideInstallNudge),
+  setHideInstallNudge: value => patchUiPrefs({ hideInstallNudge: Boolean(value) }),
+})
+
 // Give the PWA/popup context+lifecycle module a live view of the app state it needs.
 // The window-identity flags and `receivedInitialState` are live getters; the rest are
 // stable hoisted-function callbacks. The module owns its own storage bookkeeping.
@@ -520,7 +526,7 @@ BoardLayout.initPwaPopup({
     return wikiFrame
   },
   get receivedInitialState() {
-    return sessionHasReceivedInitialState(chessSession.getState())
+    return Session.sessionHasReceivedInitialState(chessSession.getState())
   },
   initializeChess,
   exportChessText,
@@ -705,13 +711,11 @@ let fenEditor
 
 // # Piece Set Preferences and Pickers
 
-// Guests always start on Merida; intentional picks last only for this page session.
-// Owners persist their last intentional choice in localStorage across games.
-let guestSessionPieceSetId = null
+// Filled by hydrateUiPrefs() before boards mount (IndexedDB global prefs).
+let uiPrefsCache = { prefsVersion: 2 }
 
-// Auto-recommended set for the current play session (e.g. Don't flip → Shapes in the
-// same-device setup). Renders this app instance's boards but is never persisted, so the
-// site-wide default stays Merida. Cleared by any intentional pick (savePieceSetPreference).
+// Intentional picks persist in IndexedDB (global). Session override is auto-recommended
+// for the current play session (e.g. Don't flip → Shapes) and is never persisted.
 let sessionPieceSetOverrideId = null
 
 function applySessionPieceSetOverride(id) {
@@ -720,36 +724,13 @@ function applySessionPieceSetOverride(id) {
 
 function loadPieceSetPreference() {
   if (sessionPieceSetOverrideId) return sessionPieceSetOverrideId
-  if (isGuestViewer()) {
-    return guestSessionPieceSetId || DEFAULT_PIECE_SET_ID
-  }
-  try {
-    const raw = localStorage.getItem(PIECE_SET_STORAGE_KEY)
-    if (raw == null) return DEFAULT_PIECE_SET_ID
-    try {
-      const parsed = JSON.parse(raw)
-      if (typeof parsed === 'string') return normalizePieceSetId(parsed)
-    } catch {
-      /* legacy bare piece-set id */
-    }
-    return normalizePieceSetId(raw)
-  } catch {
-    return DEFAULT_PIECE_SET_ID
-  }
+  return normalizePieceSetId(uiPrefsCache.pieceSet || DEFAULT_PIECE_SET_ID)
 }
 
 function savePieceSetPreference(id) {
   const nextId = normalizePieceSetId(id)
   sessionPieceSetOverrideId = null
-  if (isGuestViewer()) {
-    guestSessionPieceSetId = nextId
-    return
-  }
-  try {
-    localStorage.setItem(PIECE_SET_STORAGE_KEY, JSON.stringify(nextId))
-  } catch {
-    /* localStorage can be unavailable */
-  }
+  patchUiPrefs({ pieceSet: nextId })
 }
 
 function getPieceSetFile() {
@@ -1119,7 +1100,10 @@ async function startPwaOpenChallengeJoinPreview(msg) {
     /* preview still works unsigned */
   }
 
-  const joinerDisplayName = resolvedViewerOwnerName() || session.signedInDisplayName || session.ownerName || ''
+  const isAuthenticatedOwner = Boolean(session.isOwner && session.isAuthenticated)
+  const joinerDisplayName = isAuthenticatedOwner
+    ? resolvedViewerOwnerName() || session.signedInDisplayName || session.ownerName || ''
+    : guestPlayerName()
   const joinerSite = viewingSite()
   let payload
   try {
@@ -1130,7 +1114,9 @@ async function startPwaOpenChallengeJoinPreview(msg) {
       joinerDisplayName,
       joinerSite,
       creatorSite,
-      signedInDisplayName: joinerDisplayName,
+      ownerName: isAuthenticatedOwner ? session.ownerName || joinerDisplayName : '',
+      isAuthenticatedOwner,
+      guestName: guestPlayerName(),
       remoteTitle: String(msg.title || '').trim(),
     })
   } catch (err) {
@@ -1670,10 +1656,12 @@ if (pwaBridgeActive) {
 function useOriginSiteFavicon(faviconRev) {
   const rev = String(faviconRev || '').trim()
   const href = rev ? `/favicon.png?v=${encodeURIComponent(rev)}` : '/favicon.png'
-  document.querySelectorAll('link[rel~="icon"]').forEach(link => {
+  document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]').forEach(link => {
     if (link.getAttribute('href') === href) return
     link.setAttribute('href', href)
   })
+  const preview = document.getElementById('wiki-chess-install-flag-preview')
+  if (preview && preview.getAttribute('src') !== href) preview.setAttribute('src', href)
 }
 
 function pgnStampSite() {
@@ -1691,15 +1679,13 @@ function viewingSite() {
   return pgnStampSite()
 }
 
-// # Local Settings and Preferences
+// # Local Settings and Preferences (IndexedDB — never localStorage)
 
-// Personal UI preferences that persist in the browser (localStorage) instead of
-// the wiki journal — toggling them must not create a page edit. Directed-invite
-// ChallengeTarget stays in the PGN (not here) so opponents see it when they fork.
+// Personal UI preferences live in IndexedDB so FedWiki Local Changes exports stay
+// page-only. Toggling them must not create a journal edit. Directed-invite
+// ChallengeTarget stays in the PGN so opponents see it when they fork.
 const PREFERENCE_SETTING_KEYS = [
   'confirmMoves',
-  // Live same-device flip — stored per item for refresh mid-game; cleared when the
-  // game ends (archived boards default back to don't flip).
   'sameDeviceFlip',
   'sameDeviceFlipPieces',
   'autoAcceptOpponentWikiMoves',
@@ -1716,8 +1702,219 @@ const PREFERENCE_SETTING_KEYS = [
 const LOCAL_PREFS_VERSION = 2
 const COMMENT_PREF_KEYS = ['enableComments', 'showAnnotationsBelow']
 
-function localSettingsKey() {
-  return `wiki-chess-prefs:${wikiItemId() || 'default'}`
+const UI_PREFS_DB_NAME = 'wiki-chess-ui-v1'
+const UI_PREFS_STORE = 'prefs'
+const UI_PREFS_KEY = 'global'
+
+let uiPrefsDbReady = null
+let uiPrefsHydrated = false
+
+function defaultUiPrefs() {
+  return { prefsVersion: LOCAL_PREFS_VERSION }
+}
+
+function openUiPrefsDb() {
+  if (uiPrefsDbReady) return uiPrefsDbReady
+  uiPrefsDbReady = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      resolve(null)
+      return
+    }
+    const req = indexedDB.open(UI_PREFS_DB_NAME, 1)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(UI_PREFS_STORE)) db.createObjectStore(UI_PREFS_STORE)
+    }
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  return uiPrefsDbReady
+}
+
+async function readUiPrefsFromDb() {
+  const db = await openUiPrefsDb()
+  if (!db) return null
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(UI_PREFS_STORE, 'readonly')
+    const req = tx.objectStore(UI_PREFS_STORE).get(UI_PREFS_KEY)
+    req.onsuccess = () => resolve(req.result && typeof req.result === 'object' ? req.result : null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+async function writeUiPrefsToDb(prefs) {
+  const db = await openUiPrefsDb()
+  if (!db) return
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(UI_PREFS_STORE, 'readwrite')
+    tx.objectStore(UI_PREFS_STORE).put(prefs, UI_PREFS_KEY)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error)
+  })
+}
+
+function migrateLocalStorageIntoUiPrefs(base) {
+  const prefs = { ...defaultUiPrefs(), ...(base && typeof base === 'object' ? base : {}) }
+  let touched = false
+  try {
+    if (typeof localStorage === 'undefined') return { prefs, touched }
+  } catch {
+    return { prefs, touched }
+  }
+
+  const takeJson = key => {
+    try {
+      const raw = localStorage.getItem(key)
+      if (raw == null) return undefined
+      try {
+        return JSON.parse(raw)
+      } catch {
+        return raw
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  const removeKey = key => {
+    try {
+      if (localStorage.getItem(key) == null) return
+      localStorage.removeItem(key)
+      touched = true
+    } catch {
+      /* private mode */
+    }
+  }
+
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (!key) continue
+      if (key.startsWith('wiki-chess-prefs:')) {
+        const parsed = takeJson(key)
+        if (parsed && typeof parsed === 'object') {
+          for (const prefKey of PREFERENCE_SETTING_KEYS) {
+            if (typeof parsed[prefKey] === 'boolean' && prefs[prefKey] === undefined) {
+              prefs[prefKey] = parsed[prefKey]
+            }
+          }
+          if (Number(parsed.prefsVersion) > Number(prefs.prefsVersion || 0)) {
+            prefs.prefsVersion = Number(parsed.prefsVersion)
+          }
+        }
+        removeKey(key)
+      } else if (key.startsWith('wiki-chess-pwa-installed:')) {
+        const origin = key.slice('wiki-chess-pwa-installed:'.length)
+        if (origin && localStorage.getItem(key) === 'true') {
+          prefs.pwaInstalledOrigins = { ...(prefs.pwaInstalledOrigins || {}), [origin]: true }
+        }
+        removeKey(key)
+      } else if (key.startsWith('WikiChess-') && key.endsWith('newGameColor')) {
+        const color = takeJson(key)
+        if (typeof color === 'string' && prefs.newGameColor === undefined) prefs.newGameColor = color
+        removeKey(key)
+      }
+    }
+  } catch {
+    /* localStorage iteration can throw */
+  }
+
+  const guestRaw = takeJson('wiki-chess-guest-name')
+  if (typeof guestRaw === 'string' && guestRaw.trim() && prefs.guestName === undefined) {
+    prefs.guestName = guestSeatName(guestRaw)
+  }
+  removeKey('wiki-chess-guest-name')
+
+  const pieceRaw = takeJson('wiki-chess-piece-set')
+  if (typeof pieceRaw === 'string' && prefs.pieceSet === undefined) {
+    prefs.pieceSet = normalizePieceSetId(pieceRaw)
+  }
+  removeKey('wiki-chess-piece-set')
+
+  const themeRaw = takeJson('wiki-chess-color-theme')
+  if (themeRaw != null && prefs.colorTheme === undefined) {
+    prefs.colorTheme = normalizeColorThemeId(themeRaw)
+  }
+  removeKey('wiki-chess-color-theme')
+
+  try {
+    if (localStorage.getItem('wiki-chess-local-puzzle-download') === '1') {
+      if (prefs.localPuzzleDownload === undefined) prefs.localPuzzleDownload = true
+    }
+  } catch {
+    /* ignore */
+  }
+  removeKey('wiki-chess-local-puzzle-download')
+
+  try {
+    if (localStorage.getItem('wiki-chess-learned:challenge-join-fork') === '1') {
+      if (prefs.learnedChallengeJoinFork === undefined) prefs.learnedChallengeJoinFork = true
+    }
+  } catch {
+    /* ignore */
+  }
+  removeKey('wiki-chess-learned:challenge-join-fork')
+
+  try {
+    if (localStorage.getItem('hide-install-nudge') === 'true') {
+      if (prefs.hideInstallNudge === undefined) prefs.hideInstallNudge = true
+    }
+  } catch {
+    /* ignore */
+  }
+  removeKey('hide-install-nudge')
+
+  prefs.prefsVersion = LOCAL_PREFS_VERSION
+  return { prefs, touched }
+}
+
+function normalizeUiPrefsBlob(raw) {
+  const prefs = { ...defaultUiPrefs(), ...(raw && typeof raw === 'object' ? raw : {}) }
+  if (Number(prefs.prefsVersion) < LOCAL_PREFS_VERSION) {
+    for (const key of COMMENT_PREF_KEYS) delete prefs[key]
+    prefs.prefsVersion = LOCAL_PREFS_VERSION
+  }
+  return prefs
+}
+
+function persistUiPrefsCache() {
+  const snapshot = { ...uiPrefsCache, prefsVersion: LOCAL_PREFS_VERSION }
+  void writeUiPrefsToDb(snapshot).catch(() => {
+    /* private mode / quota */
+  })
+}
+
+function patchUiPrefs(patch) {
+  if (!patch || typeof patch !== 'object') return uiPrefsCache
+  uiPrefsCache = { ...uiPrefsCache, ...patch, prefsVersion: LOCAL_PREFS_VERSION }
+  persistUiPrefsCache()
+  return uiPrefsCache
+}
+
+function getUiPref(key) {
+  return uiPrefsCache?.[key]
+}
+
+function setUiPref(key, value) {
+  return patchUiPrefs({ [key]: value })
+}
+
+async function hydrateUiPrefs() {
+  if (uiPrefsHydrated) return uiPrefsCache
+  let fromDb = null
+  try {
+    fromDb = await readUiPrefsFromDb()
+  } catch {
+    fromDb = null
+  }
+  const { prefs: migrated, touched } = migrateLocalStorageIntoUiPrefs(fromDb)
+  uiPrefsCache = normalizeUiPrefsBlob(migrated)
+  if (touched || !fromDb || Number(fromDb.prefsVersion) < LOCAL_PREFS_VERSION) {
+    persistUiPrefsCache()
+  }
+  uiPrefsHydrated = true
+  return uiPrefsCache
 }
 
 // # Color theme (Bootstrap data-bs-theme)
@@ -1752,26 +1949,12 @@ function osPrefersDarkTheme() {
 }
 
 function loadColorThemePreference() {
-  try {
-    const raw = localStorage.getItem(COLOR_THEME_STORAGE_KEY)
-    if (raw == null) return DEFAULT_COLOR_THEME_ID
-    try {
-      return normalizeColorThemeId(JSON.parse(raw))
-    } catch {
-      return normalizeColorThemeId(raw)
-    }
-  } catch {
-    return DEFAULT_COLOR_THEME_ID
-  }
+  return normalizeColorThemeId(uiPrefsCache.colorTheme || DEFAULT_COLOR_THEME_ID)
 }
 
 function saveColorThemePreference(themeId) {
   const next = normalizeColorThemeId(themeId)
-  try {
-    localStorage.setItem(COLOR_THEME_STORAGE_KEY, JSON.stringify(next))
-  } catch {
-    /* localStorage can be unavailable */
-  }
+  patchUiPrefs({ colorTheme: next })
   return next
 }
 
@@ -1839,10 +2022,10 @@ function wireColorThemeToggle() {
   })
 }
 
-function omitCommentPreferenceFlags(raw) {
+function omitPersistedPreferenceFlags(raw) {
   if (!raw || typeof raw !== 'object') return raw
   const out = { ...raw }
-  for (const key of COMMENT_PREF_KEYS) delete out[key]
+  for (const key of PREFERENCE_SETTING_KEYS) delete out[key]
   return out
 }
 
@@ -1874,7 +2057,8 @@ function liveParentAuth() {
         isAuthenticated: Boolean(target.isAuthenticated),
         ownerName: String(target.ownerName || '').trim(),
       }
-      if (auth.isOwner || auth.isAuthenticated || auth.ownerName) return auth
+      // Public FedWiki ownerName is visible to guests — never treat it as proof of identity.
+      if (auth.isOwner || auth.isAuthenticated) return auth
     } catch {
       // Cross-origin frame in the parent chain — try the next candidate.
     }
@@ -1888,7 +2072,13 @@ function applyViewerContextFromShell(payload) {
   if (!chessState()) setChessState({})
   const hadJournalAccess = canWriteJournalHere()
   const signedInDisplayName = payload.signedInDisplayName || payload.ownerName
-  if (signedInDisplayName) chessState().signedInDisplayName = signedInDisplayName
+  const mayUseOwnerIdentity =
+    payload.viewerCanClaimWikiSeat === true ||
+    (payload.viewerAuthenticated === true && Boolean(signedInDisplayName))
+  if (signedInDisplayName && mayUseOwnerIdentity) chessState().signedInDisplayName = signedInDisplayName
+  else if (payload.viewerCanClaimWikiSeat === false && payload.viewerAuthenticated === false) {
+    delete chessState().signedInDisplayName
+  }
   if (typeof payload.pageOnThisWiki === 'boolean') chessState().pageOnThisWiki = payload.pageOnThisWiki
   if (typeof payload.ownerCanJournalHere === 'boolean') chessState().ownerCanJournalHere = payload.ownerCanJournalHere
   if (typeof payload.guestLocalStoragePersist === 'boolean')
@@ -1903,6 +2093,17 @@ function applyViewerContextFromShell(payload) {
   if (payload.faviconRev != null) {
     chessState().faviconRev = payload.faviconRev
     if (isPwaStandalone) useOriginSiteFavicon(payload.faviconRev)
+  }
+  // Session handoff for popup reload (menu included — no PGN required).
+  BoardLayout.rememberPopupState({
+    ...(chessState() || {}),
+    itemId: wikiItemId() || chessState()?.itemId,
+    pageKey: wikiPageSlug(),
+  })
+  // Guest → signed-in mid-game: rewrite the plain Guest seat to the wiki identity and
+  // keep the board playable (fork or continue on the same page).
+  if (!hadJournalAccess && canWriteJournalHere()) {
+    Game.upgradeGuestSeatAfterSignIn?.()
   }
   if (isPuzzleState(chessState())) Puzzle.refreshPuzzleControlVisibility()
   Survey.refreshSurveyIfVisible()
@@ -1953,6 +2154,9 @@ let pwaSessionReachable = true
 let pwaSessionResolved = false
 let pwaAuthLockEl = null
 let pwaAuthLockPage = null
+// Ignore a single unsigned /session while we already have journal access (mobile
+// cookie races on focus). Two consecutive unsigned reads clear the padlock.
+let pwaAuthUnsignedStreak = 0
 
 function setAuthLockIcon(btn, locked) {
   const icon = btn.querySelector('.wiki-chess-auth-lock-icon')
@@ -2088,10 +2292,17 @@ function refreshPwaAuthLock() {
     return
   }
 
-  if (!pwaSessionReachable) {
-    setAuthLockIcon(btn, true)
-    btn.title = 'Offline — reconnect, then sign in to save changes to your wiki'
-    btn.disabled = false
+  if (canWriteJournalHere()) {
+    const name = resolvedViewerOwnerName() || String(chessState()?.signedInDisplayName || '').trim() || 'wiki owner'
+    setAuthLockIcon(btn, false)
+    if (!pwaSessionReachable) {
+      btn.title = `Signed in as ${name} — offline; reconnect to sync with your wiki`
+    } else if (isPwaJournalless()) {
+      btn.title = `Signed in as ${name} — saved on this device only until you tap Save to wiki`
+    } else {
+      btn.title = `Signed in as ${name} — changes save to your wiki`
+    }
+    btn.disabled = true
     btn.setAttribute('aria-label', btn.title)
     scheduleAuthLockLayout()
     syncPwaAuthGatedControls()
@@ -2099,15 +2310,10 @@ function refreshPwaAuthLock() {
     return
   }
 
-  if (canWriteJournalHere()) {
-    const name = resolvedViewerOwnerName() || String(chessState()?.signedInDisplayName || '').trim() || 'wiki owner'
-    setAuthLockIcon(btn, false)
-    if (isPwaJournalless()) {
-      btn.title = `Signed in as ${name} — saved on this device only until you tap Save to wiki`
-    } else {
-      btn.title = `Signed in as ${name} — changes save to your wiki`
-    }
-    btn.disabled = true
+  if (!pwaSessionReachable) {
+    setAuthLockIcon(btn, true)
+    btn.title = 'Offline — reconnect, then sign in to save changes to your wiki'
+    btn.disabled = false
     btn.setAttribute('aria-label', btn.title)
     scheduleAuthLockLayout()
     syncPwaAuthGatedControls()
@@ -2150,16 +2356,41 @@ async function refreshPwaSessionFromBridge() {
     const session = await BoardLayout.fetchPwaSession()
     pwaSessionReachable = true
     pwaSessionResolved = true
+    const unsigned =
+      session &&
+      typeof session === 'object' &&
+      session.ownerCanJournalHere === false &&
+      session.pageOnThisWiki === false
+    if (unsigned && canWriteJournalHere()) {
+      pwaAuthUnsignedStreak += 1
+      if (pwaAuthUnsignedStreak < 2) {
+        refreshPwaAuthLock()
+        return
+      }
+    } else {
+      pwaAuthUnsignedStreak = 0
+    }
     if (viewerAuthPayloadChanged(session)) {
       applyViewerContextFromShell(session)
     } else {
       refreshPwaAuthLock()
     }
   } catch {
-    pwaSessionReachable = false
-    pwaSessionResolved = true
-    refreshPwaAuthLock()
+    // Transient focus/visibility /session blips are common on mobile. Keep the
+    // last signed-in padlock state instead of flipping locked until a later retry.
+    if (!canWriteJournalHere()) {
+      pwaSessionReachable = false
+      pwaSessionResolved = true
+      refreshPwaAuthLock()
+    }
   }
+}
+
+function refreshPopupViewerContextFromShell() {
+  if (!wikiFrame || !isWikiPopup) return
+  void requestViewerContextFromShell().then(ctx => {
+    if (ctx) applyViewerContextFromShell(ctx)
+  })
 }
 
 function wirePwaAuthLock() {
@@ -2179,6 +2410,19 @@ function wirePwaAuthLock() {
     // Popup / direct tab: auth arrives via shell SET_STATE / VIEWER_CONTEXT, not /session.
     pwaSessionResolved = true
     pwaSessionReachable = true
+    // Mobile reload often paints the padlock before the opener re-adopts the tab —
+    // hydrate last-known auth from sessionStorage, then ask the shell again.
+    if (!chessState()) setChessState({})
+    if (BoardLayout.hydratePopupAuthFromSession(chessState())) {
+      /* restored pageOnThisWiki / ownerCanJournalHere for the padlock */
+    }
+    if (isWikiPopup && wikiFrame) {
+      const onVisible = () => {
+        if (document.visibilityState === 'visible') refreshPopupViewerContextFromShell()
+      }
+      window.addEventListener('focus', refreshPopupViewerContextFromShell)
+      document.addEventListener('visibilitychange', onVisible)
+    }
   }
   refreshPwaAuthLock()
 }
@@ -2206,7 +2450,14 @@ function requestViewerContextFromShell(timeoutMs = 500) {
 
 function resolvedViewerOwnerName() {
   const live = liveParentAuth()
-  return resolveSignedInUsername(live.ownerName || chessState()?.signedInDisplayName)
+  if (live.isAuthenticated && live.isOwner) {
+    return resolveSignedInUsername(live.ownerName || chessState()?.signedInDisplayName)
+  }
+  // Shell-synced seat claim only — never the public site ownerName alone.
+  if (chessState()?.viewerCanClaimWikiSeat) {
+    return resolveSignedInUsername(chessState()?.signedInDisplayName)
+  }
+  return ''
 }
 
 function viewerCanJournalAsOwner() {
@@ -2234,97 +2485,62 @@ function isGuestViewer() {
   return Boolean(wikiFrame) && !viewerCanJournalAsOwner()
 }
 
-// Guest display name remembered across games in this browser (not per-item, and
-// never journaled). Defaults to "Guest" until the visitor edits their seat name.
-// Stored as a JSON string (not a bare word) because FedWiki's "Local Changes" plugin
-// blindly JSON.parses every localStorage key — a raw "Guest" value would throw there and
-// blank out the whole Local Changes list, hiding legitimate local page edits.
-const GUEST_NAME_STORAGE_KEY = 'wiki-chess-guest-name'
-
-function readStoredGuestName() {
-  const raw = localStorage.getItem(GUEST_NAME_STORAGE_KEY)
-  if (raw == null) return raw
-  const parsed = JSON.parse(raw)
-  return typeof parsed === 'string' ? parsed : null
-}
-
+// Guest display name remembered across games in IndexedDB (global). Defaults to
+// "Guest" until the visitor edits their seat name. The name still lands in
+// `[White]`/`[Black]` on the local page fork when they play.
 function guestPlayerName() {
-  try {
-    return guestSeatName(readStoredGuestName())
-  } catch {
-    return GUEST_PLAYER_NAME
-  }
+  return guestSeatName(uiPrefsCache.guestName)
 }
 
 function rememberGuestPlayerName(name) {
-  try {
-    localStorage.setItem(GUEST_NAME_STORAGE_KEY, JSON.stringify(guestSeatName(name)))
-  } catch {
-    // localStorage can be unavailable (private mode); the name just won't persist.
-  }
+  patchUiPrefs({ guestName: guestSeatName(name) })
 }
 
 function loadLocalSettingPrefs() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(localSettingsKey()) || '{}')
-    const version = Number(parsed?.prefsVersion) || 1
-    const prefs = {}
-    for (const key of PREFERENCE_SETTING_KEYS) {
-      if (typeof parsed?.[key] === 'boolean') prefs[key] = parsed[key]
-    }
-    if (version < LOCAL_PREFS_VERSION) {
-      // Drop comment flags baked in under the old enableComments:true default.
-      for (const key of COMMENT_PREF_KEYS) delete prefs[key]
-      try {
-        localStorage.setItem(localSettingsKey(), JSON.stringify({ ...prefs, prefsVersion: LOCAL_PREFS_VERSION }))
-      } catch {
-        // private mode — migration is best-effort
-      }
-    }
-    return prefs
-  } catch {
-    return {}
+  const prefs = {}
+  for (const key of PREFERENCE_SETTING_KEYS) {
+    if (typeof uiPrefsCache?.[key] === 'boolean') prefs[key] = uiPrefsCache[key]
   }
+  return prefs
 }
 
 function saveLocalSettingPrefs(settings, { persistCommentPrefs = false } = {}) {
-  try {
-    let prev = {}
-    try {
-      prev = JSON.parse(localStorage.getItem(localSettingsKey()) || '{}') || {}
-    } catch {
-      prev = {}
-    }
-    const prefs = { ...prev, prefsVersion: LOCAL_PREFS_VERSION }
-    for (const key of PREFERENCE_SETTING_KEYS) {
-      if (COMMENT_PREF_KEYS.includes(key) && !persistCommentPrefs) continue
-      if (typeof settings?.[key] === 'boolean') prefs[key] = settings[key]
-    }
-    localStorage.setItem(localSettingsKey(), JSON.stringify(prefs))
-  } catch {
-    // localStorage can be unavailable (private mode); preferences just won't persist.
+  const patch = {}
+  for (const key of PREFERENCE_SETTING_KEYS) {
+    if (COMMENT_PREF_KEYS.includes(key) && !persistCommentPrefs) continue
+    if (typeof settings?.[key] === 'boolean') patch[key] = settings[key]
   }
+  if (Object.keys(patch).length) patchUiPrefs(patch)
 }
 
 function gameSettings() {
-  // Site defaults < PGN `[Comments]` < item JSON (non-comment) < local prefs.
-  // Comment flags are omitted from the session/item layer so an old shell default
-  // or a prior persist cannot force the banner on without a tag or user toggle.
+  // Site defaults < global IndexedDB prefs < item JSON (non-preference) < PGN tags
+  // (page author wins for showcase). Preference keys are omitted from the item
+  // layer so stale mirrors cannot override personal prefs or PGN tags.
   const pgn = chessState()?.PGN || chessState()?.chessState || ''
-  return mergeGameSettings(
+  let settings = mergeGameSettings(
     mergeGameSettings(
-      mergeGameSettings(siteGameSettingDefaults(viewingSite()), pgnGameSettingDefaults(pgn)),
-      omitCommentPreferenceFlags(chessState()?.gameSettings),
+      mergeGameSettings(siteGameSettingDefaults(viewingSite()), loadLocalSettingPrefs()),
+      omitPersistedPreferenceFlags(chessState()?.gameSettings),
     ),
-    loadLocalSettingPrefs(),
+    pgnGameSettingDefaults(pgn),
   )
+  // Finished same-device games suppress flip in-session without clearing global prefs.
+  if (ephemeralFlipResetKey === String(wikiItemId() || 'default')) {
+    settings = mergeGameSettings(settings, { sameDeviceFlip: false, sameDeviceFlipPieces: false })
+  }
+  return settings
 }
 
 function persistGameSettings(settings = gameSettings(), { persistCommentPrefs = false } = {}) {
   const normalized = normalizeGameSettings(settings)
   const prev = normalizeGameSettings(chessState()?.gameSettings)
   chessState().gameSettings = normalized
-  // Preference toggles persist locally — survive a refresh with no journal entry.
+  // Re-enabling flip after a finished game clears the in-session suppress flag.
+  if (normalized.sameDeviceFlip || normalized.sameDeviceFlipPieces) {
+    ephemeralFlipResetKey = null
+  }
+  // Preference toggles persist in IndexedDB — survive a refresh with no journal entry.
   // Comment banner keys only rewrite when the user toggles those checkboxes.
   saveLocalSettingPrefs(normalized, { persistCommentPrefs })
   // Session-only item mirror for challengeCreatorColor (invite target is PGN ChallengeTarget).
@@ -2333,9 +2549,10 @@ function persistGameSettings(settings = gameSettings(), { persistCommentPrefs = 
   }
 }
 
-// Same-device flip is a live-play preference (localStorage per item). Once the game
-// has a final result, drop it so archived boards default to don't flip. Cleared once
-// per item per session — the settings panel can re-enable flip for review afterward.
+// Same-device flip is a personal preference (IndexedDB global). Once the game has a
+// final result, suppress flip for this item in-session so archived boards default to
+// don't flip — without clearing the global preference. Cleared once per item per
+// session — the settings panel can re-enable flip for review afterward.
 let ephemeralFlipResetKey = null
 
 function ensureEphemeralFlipPrefsForGameLifecycle() {
@@ -2349,22 +2566,9 @@ function ensureEphemeralFlipPrefsForGameLifecycle() {
   if (ephemeralFlipResetKey === key) return
   ephemeralFlipResetKey = key
 
-  const prefs = loadLocalSettingPrefs()
-  const stateSettings = normalizeGameSettings(chessState()?.gameSettings)
-  if (
-    !stateSettings.sameDeviceFlip &&
-    !stateSettings.sameDeviceFlipPieces &&
-    !prefs.sameDeviceFlip &&
-    !prefs.sameDeviceFlipPieces
-  ) {
-    return
-  }
+  const settings = gameSettings()
+  if (!settings.sameDeviceFlip && !settings.sameDeviceFlipPieces) return
 
-  const next = mergeGameSettings(gameSettings(), {
-    sameDeviceFlip: false,
-    sameDeviceFlipPieces: false,
-  })
-  persistGameSettings(next)
   if (chessConsole) {
     settleBoardAfterPassAndPlayToggle()
     Game.applyOppositeSidesPieceFlip()
@@ -2550,7 +2754,7 @@ function wireGameSettingsPanel() {
 // moved to game.js
 
 function shouldDeferStockfishSetup(state = chessState()) {
-  return sessionShouldDeferStockfishSetup(chessSession.getState(), state)
+  return Session.sessionShouldDeferStockfishSetup(chessSession.getState(), state)
 }
 
 function pickAppStateBasics(state = chessState()) {
@@ -2622,111 +2826,134 @@ function maybeRefreshStaleViewerState() {
 // initialized via BoardLayout.initPwaPopup below.
 
 whenDocumentReady(() => {
-  // Seat-row kings on My Chess Games use in-document `#wk`/`#bk`. Prefetch even when no
-  // board mounts this session so survey rows are not blank SVG placeholders.
-  void ensurePieceSpriteCached(getPieceSpritesUrl()).catch(() => {})
-  Game.wireExportControls()
-  wireGameSettingsPanel()
-  wirePieceSetPickers()
-  wireColorThemeToggle()
-  wireFooterActions()
-  const intent = BoardLayout.resolveBootIntent({
-    hasWikiFrame: Boolean(wikiFrame),
-    isWikiPopup,
-    isPwaStandalone,
-  })
-  if (intent === 'Embed') {
-    wirePwaAuthLock()
-    requestWikiState()
-    void requestViewerContextFromShell().then(applyViewerContextFromShell)
-    for (const delay of VIEWER_CONTEXT_RETRY_DELAYS_MS) {
-      window.setTimeout(maybeRefreshStaleViewerState, delay)
-    }
-    BoardLayout.reportPwaInstalled()
-    window.addEventListener('focus', BoardLayout.reportPwaInstalled)
-    return
-  }
-  if (intent === 'WikiPopup') {
-    void BoardLayout.registerServiceWorker()
-    BoardLayout.initInstallNudge()
-    const params = new URLSearchParams(location.search)
-    wiki.popupReady({
-      itemId: params.get('itemId'),
-      pageKey: params.get('pageKey'),
+  void hydrateUiPrefs().then(() => {
+    // Seat-row kings on My Chess Games use in-document `#wk`/`#bk`. Prefetch even when no
+    // board mounts this session so survey rows are not blank SVG placeholders.
+    void ensurePieceSpriteCached(getPieceSpritesUrl()).catch(() => {})
+    Game.wireExportControls()
+    wireGameSettingsPanel()
+    wirePieceSetPickers()
+    wireColorThemeToggle()
+    wireFooterActions()
+    const intent = BoardLayout.resolveBootIntent({
+      hasWikiFrame: Boolean(wikiFrame),
+      isWikiPopup,
+      isPwaStandalone,
     })
-    window.setTimeout(BoardLayout.restorePopupWithoutOpener, POPUP_OPENER_TIMEOUT_MS)
+    if (intent === 'Embed') {
+      wirePwaAuthLock()
+      requestWikiState()
+      void requestViewerContextFromShell().then(applyViewerContextFromShell)
+      for (const delay of VIEWER_CONTEXT_RETRY_DELAYS_MS) {
+        window.setTimeout(maybeRefreshStaleViewerState, delay)
+      }
+      BoardLayout.reportPwaInstalled()
+      window.addEventListener('focus', BoardLayout.reportPwaInstalled)
+      return
+    }
+    if (intent === 'WikiPopup') {
+      void BoardLayout.registerServiceWorker()
+      BoardLayout.initInstallNudge()
+      const params = new URLSearchParams(location.search)
+      wiki.popupReady({
+        itemId: params.get('itemId'),
+        pageKey: params.get('pageKey'),
+      })
+      window.setTimeout(BoardLayout.restorePopupWithoutOpener, POPUP_OPENER_TIMEOUT_MS)
+      wirePwaAuthLock()
+      // Opener SET_STATE can lag on mobile reload; pull VIEWER_CONTEXT with retries so
+      // the padlock tracks the wiki session even when sessionStorage auth is stale.
+      refreshPopupViewerContextFromShell()
+      for (const delay of VIEWER_CONTEXT_RETRY_DELAYS_MS) {
+        window.setTimeout(() => {
+          if (canWriteJournalHere()) return
+          refreshPopupViewerContextFromShell()
+        }, delay)
+      }
+      return
+    }
+    if (intent === 'InstalledPwa') {
+      BoardLayout.markChessPwaInstalled()
+      void bootInstalledPwa().catch(err => {
+        console.error('PWA boot failed', err)
+        showChessInitError(err)
+      })
+      return
+    }
+    // Standalone tab
+    void BoardLayout.registerServiceWorker()
     wirePwaAuthLock()
-    return
-  }
-  if (intent === 'InstalledPwa') {
-    BoardLayout.markChessPwaInstalled()
-    void bootInstalledPwa()
-    return
-  }
-  void BoardLayout.registerServiceWorker()
-  wirePwaAuthLock()
-  BoardLayout.initInstallNudge()
-  BoardLayout.bootStandalone()
+    BoardLayout.initInstallNudge()
+    BoardLayout.bootStandalone()
+  })
 })
 
 async function bootInstalledPwa() {
-  BoardLayout.setPwaContextChangedHandler(syncWikiContext)
-  await BoardLayout.registerServiceWorker()
-  ChooseMenu.syncChooseMenuFederationButtons()
-  syncPwaAuthGatedControls()
-  Puzzle.refreshPuzzleControlVisibility()
-  Survey.refreshSurveyIfVisible()
-  wirePwaAuthLock()
+  try {
+    BoardLayout.setPwaContextChangedHandler(syncWikiContext)
+    await BoardLayout.registerServiceWorker()
+    ChooseMenu.syncChooseMenuFederationButtons()
+    syncPwaAuthGatedControls()
+    Puzzle.refreshPuzzleControlVisibility()
+    Survey.refreshSurveyIfVisible()
+    wirePwaAuthLock()
 
-  const params = new URLSearchParams(location.search)
-  const pageKey = params.get('pageKey') || 'standalone'
-  const itemId = params.get('itemId') || 'standalone'
-  BoardLayout.setPwaWikiContext({ slug: pageKey, itemId })
+    const params = new URLSearchParams(location.search)
+    const pageKey = params.get('pageKey') || 'standalone'
+    const itemId = params.get('itemId') || 'standalone'
+    BoardLayout.setPwaWikiContext({ slug: pageKey, itemId })
 
-  if (pwaBridgeActive) {
-    // Resolve wiki auth before BoardLayout.bootPwa/initializeChess so a later state replace cannot
-    // wipe signed-in flags and leave the padlock stuck locked.
-    try {
-      const session = normalizeRestoredChessSession(await BoardLayout.fetchPwaSession())
-      pwaSessionReachable = true
-      pwaSessionResolved = true
-      applyViewerContextFromShell(session)
-      if (!chessState()) setChessState({})
-      chessState().signedInDisplayName =
-        session.signedInDisplayName || session.ownerName || chessState().signedInDisplayName
-      chessState().pageOnThisWiki = session.pageOnThisWiki
-      chessState().ownerCanJournalHere = session.ownerCanJournalHere
-      chessState().viewerCanClaimWikiSeat = session.viewerCanClaimWikiSeat
-      chessState().viewerAuthenticated = session.viewerAuthenticated
-      if (session.faviconRev != null) chessState().faviconRev = session.faviconRev
-    } catch {
-      pwaSessionReachable = false
-      pwaSessionResolved = true
-      refreshPwaAuthLock()
-    }
-    if (pageKey !== 'standalone' && itemId !== 'standalone') {
+    if (pwaBridgeActive) {
+      // Resolve wiki auth before BoardLayout.bootPwa/initializeChess so a later state replace cannot
+      // wipe signed-in flags and leave the padlock stuck locked.
       try {
-        const data = await BoardLayout.loadPwaGameState(pageKey, itemId)
-        if (data?.chessObj) {
-          markShellStateReceived()
-          initializeChess({
-            ...data.chessObj,
-            itemId: data.itemId || itemId,
-            pwaJournalless: false,
-          })
-          hideAppLoadingScreen()
-          wiki.requestViewerContext(itemId)
-          return
-        }
+        const session = normalizeRestoredChessSession(await BoardLayout.fetchPwaSession())
+        pwaSessionReachable = true
+        pwaSessionResolved = true
+        applyViewerContextFromShell(session)
+        if (!chessState()) setChessState({})
+        chessState().signedInDisplayName =
+          session.signedInDisplayName || session.ownerName || chessState().signedInDisplayName
+        chessState().pageOnThisWiki = session.pageOnThisWiki
+        chessState().ownerCanJournalHere = session.ownerCanJournalHere
+        chessState().viewerCanClaimWikiSeat = session.viewerCanClaimWikiSeat
+        chessState().viewerAuthenticated = session.viewerAuthenticated
+        if (session.faviconRev != null) chessState().faviconRev = session.faviconRev
       } catch {
-        /* fall through to menu */
+        pwaSessionReachable = false
+        pwaSessionResolved = true
+        refreshPwaAuthLock()
+      }
+      if (pageKey !== 'standalone' && itemId !== 'standalone') {
+        try {
+          const data = await BoardLayout.loadPwaGameState(pageKey, itemId)
+          if (data?.chessObj) {
+            markShellStateReceived()
+            initializeChess({
+              ...data.chessObj,
+              itemId: data.itemId || itemId,
+              pwaJournalless: false,
+            })
+            wiki.requestViewerContext(itemId)
+            return
+          }
+        } catch {
+          /* fall through to menu */
+        }
+      }
+      try {
+        wiki.requestViewerContext(itemId)
+      } catch (err) {
+        console.warn('PWA viewer-context request failed', err)
       }
     }
-    wiki.requestViewerContext(itemId)
-  }
 
-  if (!sessionHasReceivedInitialState(chessSession.getState())) {
-    await BoardLayout.bootPwa()
+    if (!Session.sessionHasReceivedInitialState(chessSession.getState())) {
+      await BoardLayout.bootPwa()
+    }
+  } finally {
+    // Never leave the installed PWA stuck on the boot splash after any path.
+    hideAppLoadingScreen()
   }
 }
 
@@ -2745,7 +2972,9 @@ const appShellMessageHandlers = {
         state.itemId = event.data.itemId
       }
       applyWikiItemTextFromShell(event.data?.wikiItemText, state)
-      if (shouldDeferNewGameSetup()) {
+      // replaceInPlace is explicit navigation (My Chess Games click, popup handoff) —
+      // it exits setup below, so a stuck/parked setup guard must not swallow it.
+      if (shouldDeferNewGameSetup() && !replaceInPlace) {
         hideAppLoadingScreen()
         return
       }
@@ -2807,7 +3036,7 @@ const appShellMessageHandlers = {
         } else {
           setSessionFollowsPopup(false)
         }
-        if (sessionShouldReopenGameSetup(chessSession.getState(), state)) {
+        if (Session.sessionShouldReopenGameSetup(chessSession.getState(), state)) {
           if (state.openChallengeSetupPending) {
             enterOpenChallengeSetup(state)
           } else {
@@ -2896,7 +3125,7 @@ const appShellMessageHandlers = {
     })
   },
   [MSG.ABANDON_FETCHES]() {
-    Survey.leaveFederationViews()
+    Survey.abandonInFlightFetches()
   },
   [MSG.REQUEST_RESIGN]() {
     whenDocumentReady(() => {
@@ -2911,9 +3140,6 @@ const appShellMessageHandlers = {
   [MSG.REQUEST_SWITCH_GAME_MODE]() {
     whenDocumentReady(() => ChooseMenu.handleMirrorSwitchGameModeRequest())
   },
-  [MSG.REQUEST_OPEN_POSITION_EDITOR](event) {
-    whenDocumentReady(() => ChooseMenu.handleMirrorOpenPositionEditorRequest(event.data?.fen))
-  },
   [MSG.SITE_DISPLAY](event) {
     Game.fulfillSiteDisplayLookup({
       requestId: event.data?.requestId,
@@ -2924,6 +3150,9 @@ const appShellMessageHandlers = {
   },
   [MSG.PUZZLE_PAGES_DATA](event) {
     Puzzle.receivePuzzlePagesData(event.data)
+  },
+  [MSG.LOCAL_ACADEMY_PROGRESS_DATA](event) {
+    Puzzle.receiveLocalAcademyProgressData(event.data)
   },
   [MSG.PASTE_CAPTURE](event) {
     const text = event.data?.text
@@ -2945,7 +3174,7 @@ const appShellMessageHandlers = {
   },
 }
 
-const dispatchAppShellMessage = createMessageDispatcher(appShellMessageHandlers)
+const dispatchAppShellMessage = MsgSync.createMessageDispatcher(appShellMessageHandlers)
 BoardLayout.initInboundShellMessageBridge({ dispatch: dispatchAppShellMessage })
 
 function syncWikiContext() {
@@ -3281,7 +3510,7 @@ function canSpawnLineupGhostPage() {
 // CHOOSE menu → switch this item in place. Installed PWA always starts device-local
 // (same as wiki: bare keywords / open boards do not hit the origin until a real persist).
 // Signed-in sessions promote via Save to wiki or the first putJournal that passes
-// shouldPersistChessItemText (seats, moves, puzzle filters, …).
+// Journal.shouldPersistChessItemText (seats, moves, puzzle filters, …).
 function startChessItemFromChooseMenu(kind, { puzzleText } = {}) {
   if (pwaBridgeActive) {
     startPwaLocalSession(kind, { puzzleText })
@@ -3370,23 +3599,21 @@ function syncChooseModeButton(chooseBtn, { onGame, hideCompletedRatedNav }) {
 }
 
 function syncFooterNavVisibility() {
-  const gameNav = document.querySelector('#game .wiki-chess-nav-actions')
+  // Two nav groups bracket the copy/share actions: Resign leads the row, the
+  // general navigation buttons (my games / switch mode) trail it.
+  const gameNavGroups = document.querySelectorAll('#game .wiki-chess-nav-actions')
   const onGame = isActivePage('game')
   const onPosition = isActivePage('position')
   const chooseBtn = document.getElementById('chooseModeBtn')
-  const editBtn = document.getElementById('editPositionBtn')
   const myGamesBtn = document.getElementById('wikiChessMyGamesNav')
   const hideCompletedRatedNav = ChooseMenu.hideGameNavForCompletedRated()
   const showMyGamesNav = (isWikiEmbed || isWikiPopup) && !sessionFollowsPopup()
-  if (gameNav) {
-    // The group lays out via `display: contents` (see .wiki-chess-actions in CSS) so
-    // its buttons join the shared action row. Only toggle d-none, never d-flex.
+  for (const gameNav of gameNavGroups) {
+    // The groups lay out via `display: contents` (see .wiki-chess-actions in CSS) so
+    // their buttons join the shared action row. Only toggle d-none, never d-flex.
     gameNav.classList.toggle('d-none', !onGame)
   }
   syncChooseModeButton(chooseBtn, { onGame, hideCompletedRatedNav })
-  if (editBtn) {
-    editBtn.classList.toggle('d-none', !onGame || !chessConsole || hideCompletedRatedNav)
-  }
   if (myGamesBtn) {
     myGamesBtn.classList.toggle('d-none', !onGame || !showMyGamesNav)
   }
@@ -3411,7 +3638,6 @@ function wireFooterActions() {
 
   document.getElementById('chooseModeBtn')?.addEventListener('click', () => ChooseMenu.switchGameModeFromGame())
   Survey.wireMyChessGamesWikiButtons()
-  document.getElementById('editPositionBtn')?.addEventListener('click', () => ChooseMenu.openPositionEditorFromGame())
   document.getElementById('resignGameBtn')?.addEventListener('click', () => Game.promptResign())
   document
     .getElementById('positionChooseModeBtn')
@@ -3712,7 +3938,7 @@ function putJournal(text, { forkSite } = {}) {
     if (
       persisted &&
       canWriteJournalHere() &&
-      shouldPersistChessItemText({
+      Journal.shouldPersistChessItemText({
         itemText: persistedWikiItemText(),
         nextText: persisted,
         bareKeywordGuard: chessState()?.bareKeywordGuard,
@@ -3724,10 +3950,10 @@ function putJournal(text, { forkSite } = {}) {
     persistLocalSession()
     return
   }
-  if (sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition() || !persisted)
+  if (Session.sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition() || !persisted)
     return
   if (
-    !shouldPersistChessItemText({
+    !Journal.shouldPersistChessItemText({
       itemText: persistedWikiItemText(),
       nextText: persisted,
       bareKeywordGuard: chessState()?.bareKeywordGuard,
@@ -3825,7 +4051,7 @@ function notifyWikiPositionChanged(explicitText) {
     Game.updateExportControls()
     return
   }
-  if (sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition()) return
+  if (Session.sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition()) return
   if (journalBlocksAutosave()) return
   putJournal(text)
   Game.updateExportControls()
@@ -3843,7 +4069,7 @@ function notifyWikiMoveUndone() {
     Game.updateExportControls()
     return
   }
-  if (sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition()) return
+  if (Session.sessionBlocksAutosave(chessSession.getState()) || !canReachWikiForSave() || !canPersistPosition()) return
   if (Position.isPositionEditorMode()) return
   if (journalBlocksAutosave()) return
   const text = exportChessText()
@@ -4005,34 +4231,34 @@ function initializeChessCore(incoming) {
   }
 
   if (!chessState().PGN && !chessState().FEN && !chessState().showStartMenu) {
-    if (resolveChessViewMode(chessState()) === CHESS_VIEW.MENU) {
+    if (Session.resolveChessViewMode(chessState()) === Session.CHESS_VIEW.MENU) {
       chessState().showStartMenu = true
       chessState().format = chessState().format || 'MENU'
     }
   }
 
-  const viewMode = resolveChessViewMode(chessState())
+  const viewMode = Session.resolveChessViewMode(chessState())
 
-  if (viewMode === CHESS_VIEW.SURVEY) {
+  if (viewMode === Session.CHESS_VIEW.SURVEY) {
     chessState().showStartMenu = false
     Survey.showLeaderboardForItem()
     return
   }
 
-  if (viewMode === CHESS_VIEW.LEADERBOARD) {
+  if (viewMode === Session.CHESS_VIEW.LEADERBOARD) {
     chessState().showStartMenu = false
     Leaderboard.showLeaderboardBoardForItem()
     return
   }
 
-  if (viewMode === CHESS_VIEW.POSITION && !chessState().FEN) {
+  if (viewMode === Session.CHESS_VIEW.POSITION && !chessState().FEN) {
     chessState().FEN = START_FEN
     chessState().format = 'FEN'
     chessState().showStartMenu = false
     chessState().gameType = 'position'
   }
 
-  if (viewMode === CHESS_VIEW.MENU) {
+  if (viewMode === Session.CHESS_VIEW.MENU) {
     changePage('start')
     wireStartMenu()
     return
@@ -4045,13 +4271,13 @@ function initializeChessCore(incoming) {
     fr: { playerName: 'Joueur' },
   })
 
-  if (viewMode === CHESS_VIEW.PUZZLE) {
+  if (viewMode === Session.CHESS_VIEW.PUZZLE) {
     chessState().showStartMenu = false
     Puzzle.startPuzzle()
     return
   }
 
-  if (viewMode === CHESS_VIEW.POSITION) {
+  if (viewMode === Session.CHESS_VIEW.POSITION) {
     if (!chessState().FEN && chessState().chessState && getFormat(chessState().chessState) === 'FEN') {
       chessState().FEN = chessState().chessState
     }
@@ -4066,7 +4292,13 @@ function initializeChessCore(incoming) {
 
   if (chessState().PGN) {
     try {
-      chessState().PGN = prepareWikiPgn(chessState().PGN, chessState())
+      // Restore empty open-seat tags cm-pgn may have dropped before normalizePgnPlayers
+      // can back-fill Stockfish (see mergePgnWithSavedHeaders).
+      const incomingPgn = chessState().PGN
+      chessState().PGN = prepareWikiPgn(
+        mergePgnWithSavedHeaders(incomingPgn, chessState().wikiItemText || incomingPgn),
+        chessState(),
+      )
       chessState().parsedPGN = new Pgn(chessState().PGN)
       changePage('game')
 
@@ -4086,7 +4318,11 @@ function initializeChessCore(incoming) {
             showChessInitError(err)
           })
       } else {
-        chessState().PGN = prepareWikiPgn(chessState().PGN, chessState())
+        const livePgn = chessState().PGN
+        chessState().PGN = prepareWikiPgn(
+          mergePgnWithSavedHeaders(livePgn, chessState().wikiItemText || livePgn),
+          chessState(),
+        )
         chessConsole._wikiSeatSignature = Game.consoleSeatSignature(chessState().PGN)
         chessConsole.initGame(Game.gameInitProps())
         chessConsole._wikiNextMoveRequested = true
