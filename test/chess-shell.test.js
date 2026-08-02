@@ -117,13 +117,13 @@ describe('shell · journal gateway', () => {
   it('splits autosave when opponent and own plies arrive in one PGN update', () => {
     const prevText = `[White "olga.localhost:3001 (Olga)"]
 [Black "rosa.localhost:3001 (Rosa)"]
-[HumanPlay "remote"]
+[HumanPlay "correspondence"]
 [Result "*"]
 
 1. e4`
     const nextText = `[White "olga.localhost:3001 (Olga)"]
 [Black "rosa.localhost:3001 (Rosa)"]
-[HumanPlay "remote"]
+[HumanPlay "correspondence"]
 [Result "*"]
 
 1. e4 e5 2. Nf3`
@@ -149,7 +149,7 @@ describe('shell · journal gateway', () => {
 [White "bjorn.localhost:3001 (Bjorn)"]
 [Black "olga.localhost:3001 (Olga)"]
 [Result "*"]
-[HumanPlay "remote"]
+[HumanPlay "correspondence"]
 [Rated "yes"]`
     const prevText = `${headers}
 

@@ -4,12 +4,33 @@
     {
       "type": "paragraph",
       "id": "a1b2c3d4e5f67890",
-      "text": "Rated chess game leaderboards."
+      "text": "Rated chess game leaderboards. For more details read [[About Chess Plugin]]."
     },
     {
       "type": "chess",
       "id": "b2c3d4e5f6789012",
       "text": "LEADERBOARD"
+    }
+  ],
+  "journal": [
+    {
+      "type": "create",
+      "item": {
+        "title": "Chess Leaderboards",
+        "story": [
+          {
+            "type": "paragraph",
+            "id": "a1b2c3d4e5f67890",
+            "text": "Rated chess game leaderboards. For more details read [[About Chess Plugin]]."
+          },
+          {
+            "type": "chess",
+            "id": "b2c3d4e5f6789012",
+            "text": "LEADERBOARD"
+          }
+        ]
+      },
+      "date": 1783052203000
     }
   ]
 }

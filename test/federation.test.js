@@ -46,6 +46,9 @@ import {
   chessChallengesFromPage,
   foreignOpenChallengeItemIds,
   applyOpenChallengeSurveyEdit,
+  applyOpenChallengeRecordsEdit,
+  syncOpenChallengeSurveyOnPage,
+  readSurveyOpenChallengeRecords,
   buildSurveyItemText,
   parseSurveyRecord,
   readTrustedPeers,
@@ -57,6 +60,11 @@ import {
   neighborhoodOpponentsFromGames,
   buildFetchTargets,
   buildSurveyFetchSeeds,
+  farmPeerParentKey,
+  filterSiblingFarmPeers,
+  farmPeerHostsFromDataDirs,
+  fetchFarmPeerSites,
+  parsePresentRollSites,
   parseChessPluginIndexSites,
   fetchChessPluginIndexSites,
   resetChessPluginIndexCacheForTests,
@@ -80,8 +88,6 @@ import {
   missingTwinFindingsFromPool,
   normalizeChessCharmPatch,
   readChessPageCharm,
-  TRUSTED_PEERS_CAPTION,
-  TRUSTED_PEERS_ROSTER_ID,
   isSurveyItemText,
   CHALLENGE_STATUS_ACTIVE,
   CHALLENGE_COLOR_WHITE,
@@ -91,6 +97,7 @@ import {
   CHALLENGE_REJECT_ABOVE_MAX,
   CHALLENGE_REJECT_UNKNOWN_RATING,
   CHALLENGE_REJECT_OWNERS_ONLY,
+  CHALLENGE_REJECT_WRONG_SITE,
   probeWikiSite,
   wikiSiteValidationErrorMessage,
   protocolForSite,
@@ -123,6 +130,10 @@ import {
   LEADERBOARD_COLUMNS,
   mapWithConcurrency,
   fetchSiteGamePagesAsync,
+  gameIndexHasUnreadableEntries,
+  filterOpenChallengesStillSeeking,
+  readGameIndex,
+  normalizeGameIndexEntry,
   fetchFederationGamesAsync,
   collectSiteGamesAsync,
   fetchChallengesAsync,
@@ -174,7 +185,7 @@ describe('lib · federation', () => {
     it('lists only games from crawled hosts and builds site/game references', () => {
       const cache = {
         'alice.localhost': {
-          host: 'alice.localhost',
+          site: 'alice.localhost',
           updatedAt: 1,
           sitemap: [{ slug: 'game-one', date: 1 }],
           games: [
@@ -182,12 +193,12 @@ describe('lib · federation', () => {
               slug: 'game-one',
               title: 'Game One',
               pgn: '[White "Alice"]\n[Black "Bob"]\n[Result "1-0"]\n\n1. e4 *',
-              host: 'alice.localhost',
+              site: 'alice.localhost',
             },
           ],
         },
         'bob.localhost': {
-          host: 'bob.localhost',
+          site: 'bob.localhost',
           updatedAt: 1,
           sitemap: [{ slug: 'other-game', date: 1 }],
           games: [
@@ -195,7 +206,7 @@ describe('lib · federation', () => {
               slug: 'other-game',
               title: 'Other Game',
               pgn: '[White "Carol"]\n[Black "Dave"]\n\n1. d4 *',
-              host: 'bob.localhost',
+              site: 'bob.localhost',
             },
           ],
         },
@@ -225,10 +236,10 @@ describe('lib · federation', () => {
         sites: [],
         siteCrawlCache: {
           'alice.localhost': {
-            host: 'alice.localhost',
+            site: 'alice.localhost',
             updatedAt: 1,
             sitemap: [],
-            games: [{ slug: 'x', title: 'X', pgn: '1. e4 *', host: 'alice.localhost' }],
+            games: [{ slug: 'x', title: 'X', pgn: '1. e4 *', site: 'alice.localhost' }],
           },
         },
       })
@@ -352,37 +363,6 @@ describe('lib · federation', () => {
       }
       applyTrustedPeersToPage(page, ['alice.localhost', 'bob.localhost'])
       assert.deepEqual(readTrustedPeers(page), ['alice.localhost', 'bob.localhost'])
-      assert.equal(
-        page.story.find(entry => entry?.type === 'roster'),
-        undefined,
-      )
-    })
-
-    it('removes a leftover visible roster when trusted peers are persisted in page.chess', () => {
-      const legacyRoster = {
-        type: 'roster',
-        id: TRUSTED_PEERS_ROSTER_ID,
-        text: [TRUSTED_PEERS_CAPTION, 'alice.localhost', 'bob.localhost'].join('\n'),
-      }
-      const items = [...LEADERBOARD_PAGE_STORY.map(entry => ({ ...entry })), legacyRoster]
-      const page = {
-        title: 'Chess Leaderboards',
-        story: [],
-        journal: [],
-      }
-      for (const item of items) {
-        applyPageAction(page, {
-          type: 'add',
-          after: page.story[page.story.length - 1]?.id || '',
-          item: { ...item },
-        })
-      }
-      applyTrustedPeersToPage(page, ['alice.localhost', 'bob.localhost'])
-      assert.equal(
-        page.story.find(entry => entry?.type === 'roster'),
-        undefined,
-      )
-      assert.deepEqual(page.chess?.federation?.trustedPeers, ['alice.localhost', 'bob.localhost'])
     })
 
     it('stores federation checkpoint in page.chess without changing the visible story', () => {
@@ -558,7 +538,7 @@ describe('lib · federation', () => {
 
     it('normalizeChessCharmPatch keeps gameIndex catalog patches', () => {
       const patch = normalizeChessCharmPatch({
-        gameIndex: { active: [{ host: 'a.localhost', slug: 'g1', itemId: 'c1' }], challenges: [], completed: [] },
+        gameIndex: { active: [{ site: 'a.localhost', slug: 'g1', itemId: 'c1' }], challenges: [], completed: [] },
         federation: { trustedPeers: ['bob.localhost'] },
       })
       assert.equal(patch.gameIndex?.active?.length, 1)
@@ -575,7 +555,7 @@ describe('lib · federation', () => {
       assert.equal(
         reviseChessCharmOnPage(page, {
           gameIndex: {
-            completed: [{ host: 'a.localhost', slug: 'g1', itemId: 'c1', gameHash: 'abc', rated: true }],
+            completed: [{ site: 'a.localhost', slug: 'g1', itemId: 'c1', gameHash: 'abc', rated: true }],
             active: [],
             challenges: [],
           },
@@ -1018,7 +998,6 @@ describe('lib · federation', () => {
         creatorId: 'alice.localhost (Alice)',
         creatorSite: 'alice.localhost',
       })
-      assert.equal(rated.config.allowGuests, false)
       assert.equal(
         challengeJoinGate(rated, { viewerRating: 1500, isAuthenticatedOwner: false }).reason,
         CHALLENGE_REJECT_OWNERS_ONLY,
@@ -1031,35 +1010,58 @@ describe('lib · federation', () => {
       })
     })
 
-    it('hides casual owners-only seeks from guests but keeps guest-open seeks visible', () => {
-      const ownersOnly = buildOpenChallenge({
+    it('hides all open seeks from guests and requires owner auth to join', () => {
+      const casual = buildOpenChallenge({
         rated: false,
-        allowGuests: false,
         creatorId: 'alice.localhost (Alice)',
         creatorSite: 'alice.localhost',
       })
-      const openToGuests = buildOpenChallenge({
-        rated: false,
-        allowGuests: true,
-        creatorId: 'alice.localhost (Alice)',
-        creatorSite: 'alice.localhost',
-      })
-      assert.equal(challengeVisibleToViewer(ownersOnly, { isAuthenticatedOwner: false }), false)
-      assert.equal(challengeVisibleToViewer(openToGuests, { isAuthenticatedOwner: false }), true)
+      assert.equal(challengeVisibleToViewer(casual, { isAuthenticatedOwner: false }), false)
+      assert.equal(challengeVisibleToViewer(casual, { isAuthenticatedOwner: true }), true)
       assert.equal(
-        challengeJoinGate(ownersOnly, { isAuthenticatedOwner: false }).reason,
+        challengeJoinGate(casual, { isAuthenticatedOwner: false }).reason,
         CHALLENGE_REJECT_OWNERS_ONLY,
       )
-      assert.deepEqual(challengeJoinGate(openToGuests, { isAuthenticatedOwner: false }), {
+      assert.deepEqual(challengeJoinGate(casual, { isAuthenticatedOwner: true }), {
         ok: true,
         reason: null,
       })
     })
 
-    it('stamps AllowGuests on casual seeks and omits it for rated', () => {
+    it('blocks guests from directed wiki invites and wrong-site owners', () => {
+      const directed = buildOpenChallenge({
+        rated: false,
+        creatorId: 'rob.chess.aolc.cc (Rob)',
+        creatorSite: 'rob.chess.aolc.cc',
+        challengeTarget: 'ward.chess.aolc.cc',
+      })
+      assert.equal(challengeVisibleToViewer(directed, { isAuthenticatedOwner: false }), false)
+      assert.equal(
+        challengeJoinGate(directed, {
+          isAuthenticatedOwner: false,
+          viewingSite: 'ward.chess.aolc.cc',
+        }).reason,
+        CHALLENGE_REJECT_OWNERS_ONLY,
+      )
+      assert.deepEqual(
+        challengeJoinGate(directed, {
+          isAuthenticatedOwner: true,
+          viewingSite: 'ward.chess.aolc.cc',
+        }),
+        { ok: true, reason: null },
+      )
+      assert.equal(
+        challengeJoinGate(directed, {
+          isAuthenticatedOwner: true,
+          viewingSite: 'eve.chess.aolc.cc',
+        }).reason,
+        CHALLENGE_REJECT_WRONG_SITE,
+      )
+    })
+
+    it('stamps rated/creator tags without an AllowGuests header', () => {
       const casual = buildOpenChallenge({
         rated: false,
-        allowGuests: false,
         creatorId: 'alice.localhost (Alice)',
         creatorSite: 'alice.localhost',
       })
@@ -1070,9 +1072,10 @@ describe('lib · federation', () => {
       })
       const casualPgn = stampOpenChallengePgn('[White "alice.localhost (Alice)"]\n[Black ""]\n*', casual)
       const ratedPgn = stampOpenChallengePgn('[White "alice.localhost (Alice)"]\n[Black ""]\n*', rated)
-      assert.match(casualPgn, /\[AllowGuests "no"\]/)
+      assert.doesNotMatch(casualPgn, /AllowGuests/)
       assert.doesNotMatch(ratedPgn, /AllowGuests/)
-      assert.equal(openChallengeFromPgn(casualPgn).config.allowGuests, false)
+      assert.match(casualPgn, /\[Rated "no"\]/)
+      assert.match(ratedPgn, /\[Rated "yes"\]/)
     })
 
     it('never wraps an unauthenticated joiner with the public site owner name', () => {
@@ -1763,7 +1766,7 @@ describe('lib · federation', () => {
 
     it('harvests a pending ghost chess item', () => {
       const entry = harvestGhostOpenChallenge({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         title: 'Frank vs Open',
         itemId: 'abc123',
         pgn,
@@ -1780,7 +1783,7 @@ describe('lib · federation', () => {
 
     it('harvests a page-backed survey seek when a game slug is present', () => {
       const entry = harvestGhostOpenChallenge({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         slug: 'club-night',
         title: 'Club Night',
         itemId: 'item42',
@@ -1795,7 +1798,7 @@ describe('lib · federation', () => {
     it('rejects ghost entries missing embedded PGN', () => {
       assert.equal(
         harvestGhostOpenChallenge({
-          host: 'frank.localhost',
+          site: 'frank.localhost',
           itemId: 'abc123',
           challenge,
         }),
@@ -1805,7 +1808,7 @@ describe('lib · federation', () => {
 
     it('harvests a page-based open seek on a real game page', () => {
       const entry = harvestPageOpenChallenge({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         slug: 'club-game',
         title: 'Club game',
         itemId: 'item1',
@@ -1850,16 +1853,14 @@ describe('lib · federation', () => {
 *`
     const surveyItem = { type: 'chess', id: 'survey1', text: 'SURVEY' }
 
-    it('includes SURVEY openChallenges in chessChallengesFromPage', () => {
+    it('includes page.chess openChallenges in chessChallengesFromPage', () => {
       const entries = chessChallengesFromPage(
         {
           title: 'My Chess Games',
-          story: [
-            {
-              ...surveyItem,
-              openChallenges: [{ itemId: 'abc123', pgn, title: 'Frank vs Open', challenge }],
-            },
-          ],
+          story: [{ ...surveyItem }],
+          chess: {
+            openChallenges: [{ itemId: 'abc123', pgn, title: 'Frank vs Open', challenge }],
+          },
         },
         'frank.localhost',
         'my-chess-games',
@@ -1869,7 +1870,23 @@ describe('lib · federation', () => {
       assert.equal(entries[0]?.itemId, 'abc123')
     })
 
-    it('harvests open challenges from the SURVEY item metadata', () => {
+    it('harvests open challenges from the page charm', () => {
+      const entries = harvestSurveyOpenChallenges(
+        {
+          story: [{ ...surveyItem }],
+          chess: {
+            openChallenges: [{ itemId: 'abc123', pgn, title: 'Frank vs Open', challenge }],
+          },
+        },
+        'frank.localhost',
+        'my-chess-games',
+      )
+      assert.equal(entries.length, 1)
+      assert.equal(entries[0]?.itemId, 'abc123')
+      assert.equal(entries[0]?.pending, true)
+    })
+
+    it('falls back to legacy SURVEY item metadata when page.chess has no openChallenges', () => {
       const entries = harvestSurveyOpenChallenges(
         {
           story: [
@@ -1884,7 +1901,24 @@ describe('lib · federation', () => {
       )
       assert.equal(entries.length, 1)
       assert.equal(entries[0]?.itemId, 'abc123')
-      assert.equal(entries[0]?.pending, true)
+    })
+
+    it('syncOpenChallengeSurveyOnPage writes seeks to page.chess without journal edits', () => {
+      const page = {
+        title: 'My Chess Games',
+        story: [{ ...surveyItem }],
+        journal: [],
+      }
+      const result = syncOpenChallengeSurveyOnPage(page, {
+        add: { itemId: 'abc123', pgn, title: 'Frank vs Open', challenge },
+        site: 'frank.localhost',
+      })
+      assert.equal(result.changed, true)
+      assert.equal(page.journal.length, 0)
+      assert.equal(page.story[0].openChallenges, undefined)
+      assert.equal(readSurveyOpenChallengeRecords(page).length, 1)
+      assert.equal(page.chess?.openChallenges?.[0]?.itemId, 'abc123')
+      assert.equal(page.chess?.gameIndex?.challenges?.[0]?.itemId, 'abc123')
     })
 
     it('stores a page-backed survey record with slug (pending false when harvested)', () => {
@@ -1896,9 +1930,9 @@ describe('lib · federation', () => {
       })
       assert.equal(record?.slug, 'club-night')
       assert.equal(record?.itemId, 'item42')
-      const updated = applyOpenChallengeSurveyEdit(surveyItem, { add: { ...record, challenge } })
+      const list = applyOpenChallengeRecordsEdit([], { add: { ...record, challenge } })
       const entries = harvestSurveyOpenChallenges(
-        { story: [updated] },
+        { story: [{ ...surveyItem }], chess: { openChallenges: list } },
         'frank.localhost',
         'my-chess-games',
       )
@@ -1924,12 +1958,10 @@ describe('lib · federation', () => {
     it('ignores open challenges forked onto another wiki', () => {
       const entries = harvestSurveyOpenChallenges(
         {
-          story: [
-            {
-              ...surveyItem,
-              openChallenges: [{ itemId: 'abc123', pgn, title: 'Frank vs Open', challenge }],
-            },
-          ],
+          story: [{ ...surveyItem }],
+          chess: {
+            openChallenges: [{ itemId: 'abc123', pgn, title: 'Frank vs Open', challenge }],
+          },
         },
         'elif.localhost',
         'my-chess-games',
@@ -1938,9 +1970,9 @@ describe('lib · federation', () => {
     })
 
     it('lists foreign open-challenge ids for pruning stale fork copies', () => {
-      const story = [
-        {
-          ...surveyItem,
+      const page = {
+        story: [{ ...surveyItem }],
+        chess: {
           openChallenges: [
             { itemId: 'abc123', pgn, title: 'Frank vs Open', challenge },
             {
@@ -1959,20 +1991,25 @@ describe('lib · federation', () => {
             },
           ],
         },
-      ]
-      assert.deepEqual(foreignOpenChallengeItemIds(story, 'elif.localhost'), ['abc123'])
+      }
+      assert.deepEqual(foreignOpenChallengeItemIds(page, 'elif.localhost'), ['abc123'])
     })
 
-    it('adds and removes open challenges on the SURVEY item', () => {
-      const added = applyOpenChallengeSurveyEdit(surveyItem, {
+    it('adds and removes open challenges on the page charm list', () => {
+      const added = applyOpenChallengeRecordsEdit([], {
         add: { itemId: 'abc123', pgn, title: 'Frank vs Open', challenge },
       })
-      assert.equal(added?.openChallenges?.length, 1)
-      const removed = applyOpenChallengeSurveyEdit(added, { removeIds: ['abc123'] })
-      assert.equal(removed?.openChallenges, undefined)
+      assert.equal(added?.length, 1)
+      const removed = applyOpenChallengeRecordsEdit(added, { removeIds: ['abc123'] })
+      assert.deepEqual(removed, [])
+      // Legacy item helper still works for old pages / tests.
+      const legacy = applyOpenChallengeSurveyEdit(surveyItem, {
+        add: { itemId: 'abc123', pgn, title: 'Frank vs Open', challenge },
+      })
+      assert.equal(legacy?.openChallenges?.length, 1)
     })
 
-    it('harvests a directed wiki invite stored on SURVEY metadata', () => {
+    it('harvests a directed wiki invite stored on the page charm', () => {
       const directed = buildOpenChallenge({
         rated: true,
         creatorId: 'frank.localhost (Frank)',
@@ -1982,12 +2019,10 @@ describe('lib · federation', () => {
       })
       const entries = harvestSurveyOpenChallenges(
         {
-          story: [
-            {
-              ...surveyItem,
-              openChallenges: [{ itemId: 'dir123', pgn, title: 'Frank vs Olga', challenge: directed }],
-            },
-          ],
+          story: [{ ...surveyItem }],
+          chess: {
+            openChallenges: [{ itemId: 'dir123', pgn, title: 'Frank vs Olga', challenge: directed }],
+          },
         },
         'frank.localhost',
         'my-chess-games',
@@ -2005,7 +2040,7 @@ describe('lib · federation', () => {
         challengeTarget: 'olga.localhost',
       })
       const entry = harvestGhostOpenChallenge({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         itemId: 'dir123',
         pgn,
         title: 'Frank vs Olga',
@@ -2016,11 +2051,18 @@ describe('lib · federation', () => {
       })
       assert.equal(frankView.mine.length, 1)
       assert.equal(frankView.directedAtMe.length, 0)
-      const olgaView = partitionOpenChallenges([entry], {
+      const olgaGuest = partitionOpenChallenges([entry], {
         viewingSite: 'olga.localhost',
+        isAuthenticatedOwner: false,
       })
-      assert.equal(olgaView.mine.length, 0)
-      assert.equal(olgaView.directedAtMe.length, 1)
+      assert.equal(olgaGuest.mine.length, 0)
+      assert.equal(olgaGuest.directedAtMe.length, 1)
+      assert.equal(olgaGuest.directedAtMe[0].canJoin, false)
+      const olgaOwner = partitionOpenChallenges([entry], {
+        viewingSite: 'olga.localhost',
+        isAuthenticatedOwner: true,
+      })
+      assert.equal(olgaOwner.directedAtMe[0].canJoin, true)
     })
   })
 
@@ -2057,7 +2099,7 @@ describe('lib · federation', () => {
         opponent: { id: 'frank.localhost (Frank)', site: 'frank.localhost', rating: null },
       }
       const row = harvestAcceptedGhostGame({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         slug: 'elif-vs-frank',
         title: 'Elif vs Frank',
         itemId: 'ghost123',
@@ -2090,7 +2132,7 @@ describe('lib · federation', () => {
         },
       ]
       const accepted = harvestAcceptedGhostGame({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         slug: 'elif-vs-frank',
         title: 'Elif vs Frank',
         itemId: 'ghost123',
@@ -2154,7 +2196,7 @@ describe('lib · federation', () => {
 
 *`
       const rows = buildMyGamesList(
-        [{ slug: 'elif-vs-frank', title: 'Frank vs Elif', pgn, host: 'frank.localhost', itemId: 'abc' }],
+        [{ slug: 'elif-vs-frank', title: 'Frank vs Elif', pgn, site: 'frank.localhost', itemId: 'abc' }],
         'frank.localhost',
       )
       assert.equal(rows.length, 1)
@@ -2173,7 +2215,7 @@ describe('lib · federation', () => {
 
 *`
       const rows = buildMyGamesList(
-        [{ slug: 'new-chess-game', title: 'New Chess Game', pgn, host: 'elif.localhost', itemId: 'x' }],
+        [{ slug: 'new-chess-game', title: 'New Chess Game', pgn, site: 'elif.localhost', itemId: 'x' }],
         'elif.localhost',
       )
       assert.equal(rows.length, 1)
@@ -2188,7 +2230,7 @@ describe('lib · federation', () => {
         creatorColor: CHALLENGE_COLOR_WHITE,
       })
       const accepted = harvestAcceptedGhostGame({
-        host: 'frank.localhost',
+        site: 'frank.localhost',
         slug: 'elif-vs-frank',
         title: 'Elif vs Frank',
         itemId: 'ghost123',
@@ -2238,7 +2280,7 @@ describe('lib · federation', () => {
             title: 'Club game',
             pgn: localPgn,
             twinPgn,
-            host: 'elif.localhost',
+            site: 'elif.localhost',
             itemId: 'abc',
           },
         ],
@@ -2376,7 +2418,7 @@ describe('lib · federation', () => {
     it('filterOpenChallengesByBlockList drops rows from blocked sites', () => {
       const rows = [
         { site: 'alice.localhost', challenge: {} },
-        { host: 'bad.localhost', challenge: {} },
+        { site: 'bad.localhost', challenge: {} },
       ]
       const filtered = filterOpenChallengesByBlockList(rows, { 'bad.localhost': { reason: 'user' } })
       assert.equal(filtered.length, 1)
@@ -2479,7 +2521,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
               chess: {
                 gameIndex: {
-                  completed: slugs.map(s => ({ host, slug: s, itemId: s })),
+                  completed: slugs.map(s => ({ site: host, slug: s, itemId: s })),
                   active: [],
                   challenges: [],
                 },
@@ -2551,7 +2593,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'cached-game', itemId: 'g1', gameHash: 'stable-hash' }],
+                  completed: [{ site: host, slug: 'cached-game', itemId: 'g1', gameHash: 'stable-hash' }],
                   active: [],
                   challenges: [],
                 },
@@ -2595,8 +2637,8 @@ describe('lib · federation', () => {
               chess: {
                 gameIndex: {
                   completed: [
-                    { host, slug: 'game-a', itemId: 'a', gameHash: 'hash-a' },
-                    { host, slug: 'game-b', itemId: 'b', gameHash: gameHashB },
+                    { site: host, slug: 'game-a', itemId: 'a', gameHash: 'hash-a' },
+                    { site: host, slug: 'game-b', itemId: 'b', gameHash: gameHashB },
                   ],
                   active: [],
                   challenges: [],
@@ -2651,7 +2693,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
               chess: {
                 gameIndex: {
-                  completed: [{ host: 'index.localhost', slug: 'rated-win', itemId: 'g1' }],
+                  completed: [{ site: 'index.localhost', slug: 'rated-win', itemId: 'g1' }],
                   active: [],
                   challenges: [],
                 },
@@ -2708,6 +2750,118 @@ describe('lib · federation', () => {
       assert.equal(rebuilt.rebuiltGameIndex.active[0].slug, 'live-game')
     })
 
+    it('detects unreadable gameIndex rows and rebuilds when rebuildIfEmpty is set', async () => {
+      const activePgn = `[White "seed.localhost (Ada)"]
+[Black "peer.localhost (Bea)"]
+[Result "*"]
+[Rated "no"]
+
+1. d4 d5 *`
+      assert.equal(
+        gameIndexHasUnreadableEntries({
+          active: [{ host: 'seed.localhost', slug: 'live-game', itemId: 'g1' }],
+        }),
+        true,
+      )
+      assert.equal(normalizeGameIndexEntry({ host: 'seed.localhost', slug: 'live-game', itemId: 'g1' }), null)
+      assert.ok(normalizeGameIndexEntry({ site: 'seed.localhost', slug: 'live-game', itemId: 'g1' }))
+
+      const site = {
+        async getPage(_host, slug) {
+          if (slug === 'my-chess-games.json') {
+            return {
+              title: SURVEY_PAGE_TITLE,
+              story: SURVEY_PAGE_STORY.map(entry => ({ ...entry })),
+              chess: {
+                gameIndex: {
+                  updatedAt: 1,
+                  active: [{ host: 'seed.localhost', slug: 'live-game', itemId: 'g1', title: 'Live' }],
+                  completed: [],
+                  challenges: [],
+                  peers: [],
+                },
+              },
+            }
+          }
+          if (slug === 'system/sitemap.json') {
+            return [{ slug: 'live-game', date: 1 }]
+          }
+          if (slug === 'live-game.json') {
+            return { title: 'Live', story: [{ type: 'chess', id: 'g1', text: activePgn }] }
+          }
+          return null
+        },
+      }
+      assert.equal(readGameIndex(await site.getPage('seed.localhost', 'my-chess-games.json')).active.length, 0)
+      const rebuilt = await fetchSiteGamePagesAsync(site, 'seed.localhost', { rebuildIfEmpty: true })
+      assert.equal(rebuilt.pageGames.length, 1)
+      assert.equal(rebuilt.rebuiltGameIndex?.active?.[0]?.site, 'seed.localhost')
+      assert.equal(rebuilt.rebuiltGameIndex?.active?.[0]?.slug, 'live-game')
+    })
+
+    it('filters open challenges whose page game already has both seats filled', () => {
+      const filledPgn = `[White "a.localhost (A)"]
+[Black "b.localhost (B)"]
+[Result "*"]
+
+*`
+      const kept = filterOpenChallengesStillSeeking(
+        [
+          { itemId: 'filled', slug: 'test-game', title: 'Test', pgn: '[Black ""]', challenge: { status: 'open' } },
+          { itemId: 'open', slug: 'other-game', title: 'Other', pgn: '[Black ""]', challenge: { status: 'open' } },
+        ],
+        [{ itemId: 'filled', slug: 'test-game', pgn: filledPgn }],
+      )
+      assert.equal(kept.length, 1)
+      assert.equal(kept[0].itemId, 'open')
+    })
+
+    it('retires a survey seek and first-writes page.chess.openChallenges without wiping unreadable gameIndex', () => {
+      const surveyChess = SURVEY_PAGE_STORY.find(row => row.type === 'chess')
+      const page = {
+        title: SURVEY_PAGE_TITLE,
+        story: [
+          { ...SURVEY_PAGE_STORY[0] },
+          {
+            ...surveyChess,
+            openChallenges: [
+              {
+                itemId: 'f2c3337f622eecec',
+                slug: 'test-chess-game',
+                title: 'Test Chess Game',
+                pgn: '[White "rob.localhost (Rob)"]\n[Black ""]\n*',
+                challenge: buildOpenChallenge({
+                  rated: false,
+                  creatorId: 'rob.localhost (Rob)',
+                  creatorSite: 'rob.localhost',
+                  challengeTarget: 'ward.localhost',
+                }),
+              },
+            ],
+          },
+        ],
+        chess: {
+          gameIndex: {
+            updatedAt: 1,
+            active: [{ host: 'rob.localhost', slug: 'test-chess-game', itemId: 'f2c3337f622eecec' }],
+            completed: [],
+            challenges: [],
+            peers: [],
+          },
+        },
+      }
+      assert.equal(chessCharmPatchWouldChange(page, { openChallenges: [] }), true)
+      const result = syncOpenChallengeSurveyOnPage(page, {
+        removeIds: ['f2c3337f622eecec'],
+        site: 'rob.localhost',
+      })
+      assert.equal(result.changed, true)
+      assert.equal(result.gameIndexTouched, false)
+      assert.deepEqual(page.chess.openChallenges, [])
+      assert.equal(page.chess.gameIndex.active[0].host, 'rob.localhost')
+      assert.equal(readSurveyOpenChallengeRecords(page).length, 0)
+    })
+
     it('crawls hosts within a BFS wave with bounded concurrency', async () => {
       let inFlight = 0
       let peak = 0
@@ -2720,7 +2874,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'solo', itemId: 'g' }],
+                  completed: [{ site: host, slug: 'solo', itemId: 'g' }],
                   active: [],
                   challenges: [],
                 },
@@ -2783,7 +2937,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  completed: [{ site: host, slug: 'rated-game', itemId: 'g1' }],
                   active: [],
                   challenges: [],
                 },
@@ -2820,7 +2974,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  completed: [{ site: host, slug: 'rated-game', itemId: 'g1' }],
                   active: [],
                   challenges: [],
                 },
@@ -2875,7 +3029,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  completed: [{ site: host, slug: 'rated-game', itemId: 'g1' }],
                   active: [],
                   challenges: [],
                 },
@@ -2941,7 +3095,7 @@ describe('lib · federation', () => {
               story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
               chess: {
                 gameIndex: {
-                  completed: [{ host, slug: 'rated-game', itemId: 'g1' }],
+                  completed: [{ site: host, slug: 'rated-game', itemId: 'g1' }],
                   active: [],
                   challenges: [],
                 },
@@ -3099,7 +3253,7 @@ describe('lib · federation', () => {
         },
       }
       const result = await orchestrateSiteSurveyDeferredWork(site, 'alice.localhost:3001', {
-        localOpenChallenges: [{ host: 'alice.localhost:3001', slug: 's', itemId: 'x', ts: 1 }],
+        localOpenChallenges: [{ site: 'alice.localhost:3001', slug: 's', itemId: 'x', ts: 1 }],
         seeds: ['bob.localhost:3001'],
         enrichGames: false,
         fetchChallenges: true,
@@ -3162,7 +3316,7 @@ describe('lib · federation', () => {
             story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
             chess: {
               gameIndex: {
-                completed: story.length ? [{ host: h, slug: 'game-1', itemId: 'g0' }] : [],
+                completed: story.length ? [{ site: h, slug: 'game-1', itemId: 'g0' }] : [],
                 active: [],
                 challenges: [],
               },
@@ -3445,6 +3599,123 @@ describe('lib · federation', () => {
       assert.equal(
         messages.some(m => /\/40/.test(m)),
         false,
+      )
+    })
+  })
+
+  describe('local farm sibling peers', () => {
+    it('derives parent keys by stripping the leftmost label', () => {
+      assert.equal(farmPeerParentKey('alice.localhost'), 'localhost')
+      assert.equal(farmPeerParentKey('alice.localhost:3001'), 'localhost')
+      assert.equal(farmPeerParentKey('olga.aolc.cc'), 'aolc.cc')
+      assert.equal(farmPeerParentKey('ward.dojo.fed.wiki'), 'dojo.fed.wiki')
+      assert.equal(farmPeerParentKey('localhost'), '')
+      assert.equal(farmPeerParentKey('aolc.cc'), 'cc')
+      assert.equal(farmPeerParentKey(''), '')
+    })
+
+    it('filters same-level sibling hosts and excludes self', () => {
+      assert.deepEqual(
+        filterSiblingFarmPeers('alice.localhost:3001', [
+          'alice.localhost:3001',
+          'bob.localhost:3001',
+          'carol.localhost',
+          'other.example.com',
+          'localhost',
+        ]),
+        ['bob.localhost:3001', 'carol.localhost'],
+      )
+      assert.deepEqual(
+        filterSiblingFarmPeers('olga.aolc.cc', ['rob.aolc.cc', 'chess.aolc.cc', 'aolc.cc', 'rob.other.cc']),
+        ['rob.aolc.cc', 'chess.aolc.cc'],
+      )
+      assert.deepEqual(filterSiblingFarmPeers('localhost', ['alice.localhost', 'bob.localhost']), [])
+    })
+
+    it('maps farm data dirs to peer hosts with the local port', () => {
+      assert.deepEqual(
+        farmPeerHostsFromDataDirs(
+          'alice.localhost:3001',
+          ['alice.localhost', 'bob.localhost', 'carol.localhost', 'other.example.com', 'status'],
+          { port: '3001' },
+        ),
+        ['bob.localhost:3001', 'carol.localhost:3001'],
+      )
+    })
+
+    it('places farm peers after neighbourhood in fetch seed order', () => {
+      assert.deepEqual(
+        buildFetchTargets({
+          localSite: 'me.localhost',
+          knownOpponents: ['opp.example'],
+          neighborhoodSites: ['nbhd.example'],
+          farmPeerSites: ['peer.localhost'],
+          indexSites: ['index.example'],
+        }),
+        ['me.localhost', 'opp.example', 'nbhd.example', 'peer.localhost', 'index.example'],
+      )
+      assert.deepEqual(
+        buildSurveyFetchSeeds('me.localhost', {
+          knownOpponents: ['opp.example'],
+          neighborhoodSites: ['nbhd.example'],
+          farmPeerSites: ['peer.localhost'],
+          indexSites: ['index.example'],
+        }),
+        ['me.localhost', 'opp.example', 'nbhd.example', 'peer.localhost', 'index.example'],
+      )
+    })
+
+    it('parses wiki-plugin-present roll sites into peer hosts', () => {
+      assert.deepEqual(
+        parsePresentRollSites(
+          {
+            roll: [
+              { site: 'alice.localhost', pages: 3 },
+              { site: 'bob.localhost', pages: 5 },
+              { site: 'carol.localhost', pages: 1 },
+              { site: 'other.example.com', pages: 2 },
+            ],
+          },
+          'alice.localhost:3001',
+        ),
+        ['bob.localhost:3001', 'carol.localhost:3001'],
+      )
+    })
+
+    it('fetchFarmPeerSites uses /plugin/present/roll and soft-fails when absent', async () => {
+      const peers = await fetchFarmPeerSites({
+        localSite: 'alice.localhost:3001',
+        fetchImpl: async url => {
+          assert.equal(url, '/plugin/present/roll')
+          return {
+            ok: true,
+            async json() {
+              return {
+                roll: [
+                  { site: 'alice.localhost', pages: 1 },
+                  { site: 'bob.localhost', pages: 2 },
+                ],
+              }
+            },
+          }
+        },
+      })
+      assert.deepEqual(peers, ['bob.localhost:3001'])
+      assert.deepEqual(
+        await fetchFarmPeerSites({
+          localSite: 'alice.localhost:3001',
+          fetchImpl: async () => ({ ok: false, status: 404 }),
+        }),
+        [],
+      )
+      assert.deepEqual(
+        await fetchFarmPeerSites({
+          localSite: 'alice.localhost:3001',
+          fetchImpl: async () => {
+            throw new Error('offline')
+          },
+        }),
+        [],
       )
     })
   })

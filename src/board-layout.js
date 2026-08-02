@@ -27,7 +27,9 @@ import {
 // Installed-PWA HTTP bridge base path (journal, session, federation).
 export const PWA_BRIDGE_BASE = '/plugin/chess/pwa'
 
-// True when running as an installed PWA (iOS home screen or display-mode standalone/fullscreen).
+// True when this browsing context is an installed PWA (iOS home screen or display-mode
+// standalone/fullscreen). Nested iframes inherit the parent’s display-mode, so callers must
+// also require !embed/!popup before treating this as the chess installed-PWA surface.
 export function isInstalledPwa() {
   return (
     window.navigator.standalone === true ||
@@ -865,7 +867,6 @@ function playerBarOverflows(bar, rowWidth) {
 }
 
 function resetPlayerBarFit(bar) {
-  // Clear any legacy inline name scaling from older fitPlayerBars builds.
   bar.style.fontSize = ''
   const nameEl = playerBarNameEl(bar)
   if (nameEl) nameEl.style.fontSize = ''
@@ -1854,17 +1855,13 @@ function writeDrawerOpenMemory(state) {
 }
 
 // Expand game drawers by default; restore this tab's last open/closed set when present.
-// Game settings and Attributions are the exception: they always boot collapsed,
-// ignoring saved memory — older builds persisted their open default without a user
-// click, so restoring it would keep reopening the panels.
+// Game settings, board settings, and attributions always boot collapsed.
 export function wireDrawerOpenMemory() {
   if (drawerOpenMemoryWired) return
   drawerOpenMemoryWired = true
   const saved = readDrawerOpenMemory() || {}
   const state = { ...saved }
   document.querySelectorAll('details.wiki-chess-drawer').forEach(el => {
-    // Settings / attributions boot collapsed (older builds persisted open without a click).
-    // Board settings on position/puzzle used to ship with HTML open="" — same default.
     const alwaysStartClosed =
       el.classList.contains('wiki-chess-game-settings-drawer') ||
       el.classList.contains('wiki-chess-board-settings-drawer') ||
@@ -2328,7 +2325,7 @@ export function confirmPasteFromText(text, { surface = 'iframe', ...modalOptions
 //   wiki iframe embed — never register a service worker (shares /plugins/chess/ scope;
 //     SW control from an embed breaks chess-app.js loading).
 //   wiki popup — register SW + show install nudge; postMessage to opener.
-//   direct tab — same as popup without opener; opens CHOOSE menu via bootStandalone().
+  //   direct tab — no shell; HTTP /session + bridge like installed PWA; CHOOSE via bootStandalone().
 //   installed PWA — register SW, HTTP bridge via /plugin/chess/pwa, optional local-only halo.
 
 let pwaCtx
@@ -2410,9 +2407,9 @@ export function updatePwaPageChromeStatus(state, err = null, savedTitle = '', { 
   }
   if (state === 'local-only') {
     status.classList.add('is-local-only')
-    status.textContent = canWrite
+      status.textContent = canWrite
       ? 'Not on a wiki yet — edits stay on this device until you save.'
-      : 'Not signed in — changes stay on this device only and are not saved to any wiki.'
+      : 'Not signed in — changes stay on this device only.'
     return
   }
   if (state === 'error') {
@@ -2949,8 +2946,8 @@ export async function clearPwaLocalSession() {
 }
 
 // # PWA HTTP Bridge
-// Wiki iframe uses postMessage; installed PWA uses the server bridge. Inactive in
-// popups and non-installed standalone tabs.
+// Wiki iframe/popup use postMessage; shell-less surfaces (installed PWA + direct
+// /plugins/chess/ tab) use the same-origin server bridge (`pwaBridgeActive = !wikiFrame`).
 
 let pwaTransportCtx = null
 
@@ -3352,7 +3349,7 @@ export const Transport = Object.freeze({
   applyLocalOnlyHalo,
 })
 
-// Installed-PWA / popup session surface — prefer PWA.* over new flat aliases.
+// Installed-PWA / popup session surface.
 export const PWA = Object.freeze({
   BRIDGE_BASE: PWA_BRIDGE_BASE,
   isInstalled: isInstalledPwa,

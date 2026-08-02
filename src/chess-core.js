@@ -243,18 +243,6 @@ function fenSquareIndex(square) {
   return rank * 8 + file
 }
 
-// Color ('w' | 'b') of the piece on `square` in a FEN, or null when the square is
-// empty or the FEN/square is malformed.
-export function fenPieceColorAt(fen, square) {
-  const expanded = expandFenPlacementSquares(normalizeFen(fen).split(/\s+/)[0])
-  if (expanded.length !== 64) return null
-  const idx = fenSquareIndex(square)
-  if (idx < 0) return null
-  const ch = expanded[idx]
-  if (ch === '.') return null
-  return ch === ch.toUpperCase() ? 'w' : 'b'
-}
-
 // FEN one ply earlier: pawn back on its starting double-step square, no EP target.
 export function fenBeforeEnPassantDoubleStep(fen) {
   const move = lastMoveFromEnPassantTarget(fen)
@@ -354,15 +342,8 @@ export function detectClipboardChessFormat(rawText) {
   if (!text) return { format: 'EMPTY', content: '', mode: 'NONE' }
 
   // A pasted bare keyword (GAME/POSITION/PUZZLE/CHOOSE) falls through to UNKNOWN
-  // here, so isPasteActionable() treats it as "not chess data we can load".
+  // here, so isPasteContentValid() treats it as "not chess data we can load".
   return { format: getFormat(text), content: text, mode: 'NONE' }
-}
-
-// Whether pasted clipboard content can replace item text
-export function isPasteActionable(detected, rawText) {
-  if (!detected?.format) return false
-  const text = rawText ?? detected.content ?? ''
-  return isPasteContentValid(text, detected)
 }
 
 // Journal item text to store after the user confirms a paste
@@ -1041,6 +1022,21 @@ export function resolvePuzzleThemeKey(raw) {
   return partial?.id || null
 }
 
+// Rank the recommended theme badge ids for the filter UI. When `themeCounts` is
+// provided (from a farm/local sample of the current filtered pool), keep only
+// common themes that still appear and sort them by co-occurrence frequency.
+export function rankCommonPuzzleThemes(themeCounts = null, { commonIds = PUZZLE_COMMON_THEME_IDS, exclude = [] } = {}) {
+  const skip = new Set(Array.isArray(exclude) ? exclude : [])
+  const base = (Array.isArray(commonIds) ? commonIds : PUZZLE_COMMON_THEME_IDS).filter(id => id && !skip.has(id))
+  if (!themeCounts || typeof themeCounts !== 'object') return base
+  return base
+    .filter(id => (Number(themeCounts[id]) || 0) > 0)
+    .sort((a, b) => {
+      const diff = (Number(themeCounts[b]) || 0) - (Number(themeCounts[a]) || 0)
+      return diff || String(a).localeCompare(String(b))
+    })
+}
+
 // True when the player narrowed rating, popularity, themes, or tags (not an unfiltered pool).
 export function hasActivePuzzleFilters(filters = {}) {
   const f = filters || {}
@@ -1176,8 +1172,8 @@ export function puzzleMatchesFilters(puzzle, filters = {}) {
     if (typeof f.maxPopularity === 'number' && puzzle.popularity > f.maxPopularity) return false
   }
   if (Array.isArray(f.themes) && f.themes.length) {
-    const wanted = new Set(f.themes)
-    if (!Array.isArray(puzzle.themes) || !puzzle.themes.some(theme => wanted.has(theme))) return false
+    // Multiple themes are AND (Lichess-style): every selected theme must appear.
+    if (!Array.isArray(puzzle.themes) || !f.themes.every(theme => puzzle.themes.includes(theme))) return false
   }
   if (Array.isArray(f.tags) && f.tags.length) {
     const wanted = new Set(f.tags)
@@ -1287,7 +1283,7 @@ export function parsePuzzleBankContent(content) {
 
   if (!puzzles.length) return null
 
-  // Single puzzle + non-puzzle trailing lines → author prompt (legacy).
+  // Single puzzle + non-puzzle trailing lines → author prompt under the board.
   let prompt
   if (puzzles.length === 1 && trailing.length) {
     prompt = trailing.join('\n')
@@ -1720,7 +1716,6 @@ export function mergeItemTextIntoChessObj(chessObj, text) {
 export const PIECE_SET_STORAGE_KEY = 'wiki-chess-piece-set'
 export const DEFAULT_PIECE_SET_ID = 'merida'
 
-// Legacy localStorage key name (migrated into IndexedDB `wiki-chess-ui-v1`).
 // Bootstrap 5.3 color mode preference (site-wide — not journal).
 // `auto` follows OS prefers-color-scheme; `light` / `dark` are explicit.
 export const COLOR_THEME_STORAGE_KEY = 'wiki-chess-color-theme'
@@ -2287,8 +2282,10 @@ export function classifyChessSave(prevText, nextText) {
   if (!pgnHasMoves(nextText) && (pgnHasMoves(prevText) || bothSeatsFilled(prevText))) {
     return 'create'
   }
-  if (pgnMovetextOnly(prevText) !== pgnMovetextOnly(nextText)) return 'move'
+  // Completing a game wins over a simultaneous movetext change (trailing result
+  // token from cm-pgn, mating move + Result in one save, resignation stamp, …).
   if (becameComplete(prevText, nextText)) return 'complete'
+  if (pgnMovetextOnly(prevText) !== pgnMovetextOnly(nextText)) return 'move'
   return changedSeat(prevText, nextText) ? 'seat' : 'edit'
 }
 
@@ -2823,6 +2820,8 @@ export function isPlainGuestSeatTag(playerTag, guestName) {
 
 // Rewrite a plain guest seat to the signed-in wiki identity. Returns the (possibly
 // unchanged) PGN. Upgrades at most one seat — White preferred when both match.
+// Never steals the opponent's Guest seat when this wiki identity already holds the
+// other side (directed-challenge join as Guest, then the creator forks back).
 export function upgradeGuestSeatTagsToWikiIdentity(
   pgn,
   { signedInDisplayName, ownerName, wikiSite, guestName } = {},
@@ -2830,9 +2829,15 @@ export function upgradeGuestSeatTagsToWikiIdentity(
   if (!pgn || !/\[/.test(pgn)) return pgn
   const displayName = resolveSignedInUsername(signedInDisplayName || ownerName)
   if (!displayName) return pgn
-  const localId = formatPlayerId(displayName, wikiSite || 'localhost')
+  const site = wikiSite || 'localhost'
+  const localId = formatPlayerId(displayName, site)
+  const siteCtx = { signedInDisplayName: displayName, wikiSite: site }
   const white = getPgnTag(pgn, 'White')
   const black = getPgnTag(pgn, 'Black')
+  const localOnWhite = white === localId || isLocalWikiPlayer(white, siteCtx)
+  const localOnBlack = black === localId || isLocalWikiPlayer(black, siteCtx)
+  if (localOnBlack && isPlainGuestSeatTag(white, guestName)) return pgn
+  if (localOnWhite && isPlainGuestSeatTag(black, guestName)) return pgn
   if (isPlainGuestSeatTag(white, guestName)) return formatPgn(setPgnTag(pgn, 'White', localId))
   if (isPlainGuestSeatTag(black, guestName)) return formatPgn(setPgnTag(pgn, 'Black', localId))
   return pgn
@@ -2903,6 +2908,21 @@ export function clearPgnTag(pgn, tag) {
 // Returns null when blank (open federation seek).
 export function challengeOpponentWikiSite(pgn) {
   return challengeTargetFromPgn(pgn) || null
+}
+
+// May this viewer claim an open challenge seat on this PGN? Always requires a signed-in
+// wiki owner. Directed invites also require viewing the target wiki.
+export function canClaimOpenSeatAsViewer(
+  pgn,
+  { viewingSite = '', isAuthenticatedOwner = false } = {},
+) {
+  if (!pgn || !/\[/.test(pgn)) return false
+  if (!isAuthenticatedOwner) return false
+  const target = challengeTargetFromPgn(pgn)
+  if (!target) return true
+  const viewing = normalizeWikiSite(viewingSite)
+  if (!viewing) return false
+  return normalizeWikiSite(target) === viewing
 }
 
 // Drop ChallengeTarget when it equals the viewing wiki (joiner leftover after accept).
@@ -3344,6 +3364,9 @@ function shouldRealignHumanSeatToEditorWiki(tag, oppositeTag, editorHost) {
   if (parseStockfishLevel(tag) != null) return false
   if (playerTagOnViewingWikiSite(tag, editorHost)) return false
   if (parseStockfishLevel(oppositeTag) != null || isOpenSeatTag(oppositeTag)) return true
+  // Creator already seated on this wiki — a plain/Guest opposite tag is the joiner,
+  // not an unbound local name to absorb (forking their Guest accept must not double-seat).
+  if (playerTagOnViewingWikiSite(oppositeTag, editorHost)) return false
   if (isWikiLinkedPlayerTag(oppositeTag) && !playerTagOnViewingWikiSite(oppositeTag, editorHost)) {
     return false
   }
@@ -3353,20 +3376,24 @@ function shouldRealignHumanSeatToEditorWiki(tag, oppositeTag, editorHost) {
 
 export function getSeatClaimOffer(
   pgn,
-  { signedInDisplayName, ownerName, wikiSite, pageOnThisWiki, guestName, wikiJoinId } = {},
+  { signedInDisplayName, ownerName, wikiSite, pageOnThisWiki, wikiJoinId } = {},
 ) {
   if (!pgn || !/\[/.test(pgn)) return null
   if (getHumanPlayMode(pgn) === HUMAN_PLAY_SAME_DEVICE) return null
 
   const white = getPgnTag(pgn, 'White')
   const black = getPgnTag(pgn, 'Black')
+  const isAuthenticatedOwner = Boolean(wikiJoinId) || Boolean(pageOnThisWiki && (signedInDisplayName || ownerName))
+  // Federation open seats require a signed-in wiki owner (no Guest "Take seat" path).
+  if (!canClaimOpenSeatAsViewer(pgn, { viewingSite: wikiSite, isAuthenticatedOwner })) {
+    return null
+  }
 
-  // An unauthenticated guest can only sit down in an open seat, and only as a plain
-  // guest name (no wiki challenge / takeover). Their game stays local — never journaled.
   // A signed-in wiki owner browsing a remote challenge in their lineup uses `wikiJoinId`
-  // for the same open-seat-only rule, but keeps their federated seat name.
+  // for the open-seat-only rule and keeps their federated seat name.
   if (!pageOnThisWiki) {
-    const localId = wikiJoinId || guestSeatName(guestName)
+    if (!wikiJoinId) return null
+    const localId = wikiJoinId
     const guestHoldsSeat = white === localId || black === localId
     const options = []
     for (const [seat, tag] of [
@@ -3374,7 +3401,11 @@ export function getSeatClaimOffer(
       ['Black', black],
     ]) {
       if (guestHoldsSeat || !isOpenSeatTag(tag)) continue
-      options.push({ seat, current: tag || '', challenge: false })
+      options.push({
+        seat,
+        current: tag || '',
+        challenge: Boolean(isOpenWikiChallengeSeat(tag, wikiSite, challengeOpponentWikiSite(pgn))),
+      })
     }
     return options.length ? { localId, options } : null
   }
@@ -3539,13 +3570,12 @@ export function wikiSitePageUrl(host, slug = WIKI_HOME_PAGE_SLUG) {
 
 export function playerWikiSiteLinkHtml(domain, username, { className = 'wiki-chess-wiki-site-link' } = {}) {
   if (!domain) return ''
-  const href = wikiSitePageUrl(domain)
   const label = wikiSiteLinkLabel(domain)
-  const target = wikiSiteLinkTarget(domain)
-  const domainLink = `<a class="${className}" href="${escapeHtml(href)}" target="${escapeHtml(target)}" rel="noopener noreferrer" title="Visit ${escapeHtml(label)}">${escapeHtml(label)}</a>`
+  // Span (not <a>): looks link-like via CSS, but double-click / drag selects as plain text.
+  const domainEl = `<span class="${className}">${escapeHtml(label)}</span>`
   // Display name first; domain secondary (matches My Chess Games seat rows).
-  if (!username) return domainLink
-  return `${escapeHtml(username)} <span class="wiki-chess-wiki-site-label">${domainLink}</span>`
+  if (!username) return domainEl
+  return `${escapeHtml(username)} <span class="wiki-chess-wiki-site-label">${domainEl}</span>`
 }
 
 // Prefer PGN [White]/[Black] tags — player.name can lag or omit @wikiSite.
@@ -3804,8 +3834,8 @@ export function pgnUtcTimeTag(date = new Date()) {
   return `${h}:${min}:${s}`
 }
 
-// Local Date instance for a game's start, from its UTCDate/UTCTime tags. null when
-// the tags are missing or unparseable (games created before start times were stamped).
+// Local Date instance for a game's start, from its UTCDate/UTCTime tags.
+// null when the tags are missing or unparseable.
 export function gameStartInstant({ utcDate, utcTime } = {}) {
   const dm = String(utcDate || '')
     .trim()
@@ -4149,9 +4179,7 @@ export function positionStartModalFields({
   // Challenge-only setup always means networked correspondence.
   const effectiveMode = hideHumanPlayChoice ? HUMAN_PLAY_CORRESPONDENCE : humanPlayMode
   const playChosen =
-    effectiveMode === HUMAN_PLAY_SAME_DEVICE ||
-    effectiveMode === HUMAN_PLAY_CORRESPONDENCE ||
-    effectiveMode === 'remote'
+    effectiveMode === HUMAN_PLAY_SAME_DEVICE || effectiveMode === HUMAN_PLAY_CORRESPONDENCE
   const playMode = playChosen ? normalizeHumanPlayMode(effectiveMode) : null
   const isEngine = opponent === 'engine'
   const isHumanRemote = opponent === 'human' && playMode === HUMAN_PLAY_CORRESPONDENCE
@@ -4200,7 +4228,6 @@ export function setHumanPlayMode(pgn, mode) {
 export function getHumanPlayMode(pgn) {
   const tag = getPgnTag(pgn, 'HumanPlay')
   if (tag === HUMAN_PLAY_SAME_DEVICE) return HUMAN_PLAY_SAME_DEVICE
-  if (tag === HUMAN_PLAY_CORRESPONDENCE || tag === 'remote') return HUMAN_PLAY_CORRESPONDENCE
   return HUMAN_PLAY_CORRESPONDENCE
 }
 
@@ -4208,7 +4235,7 @@ export function getHumanPlayMode(pgn) {
 export function isSameDeviceHumanPlay(pgnOrState) {
   if (pgnOrState && typeof pgnOrState === 'object') {
     if (pgnOrState.humanPlayMode === HUMAN_PLAY_SAME_DEVICE) return true
-    if (pgnOrState.humanPlayMode === HUMAN_PLAY_CORRESPONDENCE || pgnOrState.humanPlayMode === 'remote') {
+    if (pgnOrState.humanPlayMode === HUMAN_PLAY_CORRESPONDENCE) {
       return false
     }
     const pgn = pgnOrState.PGN || pgnOrState.chessState
@@ -5172,7 +5199,7 @@ export function shouldReinitChessViewFromSync(incoming) {
 // # Namespace Exports
 
 // Prefer these namespaces (or `import * as Module`) at new call sites.
-// Flat named exports remain for tests and gradual migration — do not add new flat aliases.
+// Flat named exports remain for tests — do not add new flat aliases.
 
 // FEN / PGN / clipboard format validation and detection.
 export const ChessRules = Object.freeze({
@@ -5188,7 +5215,6 @@ export const ChessRules = Object.freeze({
   chessContentSignature,
   normalizeFen,
   lastMoveFromEnPassantTarget,
-  fenPieceColorAt,
   fenBeforeEnPassantDoubleStep,
   START_FEN,
 })
@@ -5197,8 +5223,6 @@ export const ChessRules = Object.freeze({
 export const Paste = Object.freeze({
   detect: detectClipboardChessFormat,
   isContentValid: isPasteContentValid,
-  // Deprecated: Prefer isContentValid / isPasteContentValid — same check.
-  isActionable: isPasteActionable,
   resolveItemText: resolvePasteItemText,
   confirmMessage: pasteConfirmMessage,
   applyLabel: pasteApplyLabel,
@@ -5236,6 +5260,7 @@ export const PuzzlePool = Object.freeze({
   puzzleMatchesFilters,
   puzzlePlayerColor,
   hasActivePuzzleFilters,
+  rankCommonPuzzleThemes,
   formatPuzzleFiltersLabel,
   recordAdaptivePuzzleOutcome,
   puzzleItemProgressFromText,

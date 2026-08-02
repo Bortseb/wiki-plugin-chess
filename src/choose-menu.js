@@ -171,11 +171,11 @@ export function returnToStartMenu({ overrideSnapshot, useOverride = false } = {}
   app.newGameSetupOrigin = null
   app.closePositionStartModal()
 
-  // Installed PWA: the live game is already in the chess item PGN (or local session).
+  // PWA / popup: the live game is already in the chess item PGN (or local session).
   // Browse the menu without a resume snapshot — return via My Chess Games or reopen the page.
-  if (app.pwaBridgeActive) app.flushGameBeforeBrowse?.()
+  if (browsingPreservesOngoingGame()) app.flushGameBeforeBrowse?.()
 
-  const resumeSnapshot = app.pwaBridgeActive
+  const resumeSnapshot = browsingPreservesOngoingGame()
     ? null
     : useOverride
       ? overrideSnapshot || null
@@ -334,30 +334,71 @@ const END_GAME_BY_EDITING_NOTE =
   'Changing the chess item ends the current game. To recover it later, fork the page ' +
   'to an earlier point in its journal history.'
 
-// Installed PWA: browsing the CHOOSE menu is in-app navigation. The chess item keeps its
-// saved PGN, so leaving a game does not require resigning or overwriting the journal item.
-function pwaBrowsingPreservesOngoingGame() {
-  return Boolean(app.pwaBridgeActive)
+// Installed PWA / wiki popup: browsing the CHOOSE menu is in-app navigation. The chess
+// item keeps its saved PGN, so leaving a game does not require resigning or overwriting
+// the journal item — reopen it later from My Chess Games.
+function browsingPreservesOngoingGame() {
+  return Boolean(app.pwaBridgeActive || app.isWikiPopup)
 }
 
+function showSpawnChessPageFailed() {
+  const canPublish = Boolean(app.canPublish?.())
+  app.openEmbeddedConfirmModal?.({
+    title: 'Could not open a new chess page',
+    message: canPublish
+      ? 'Try again or refresh the wiki page.'
+      : 'Sign in on your wiki to add a new chess page.',
+    confirmLabel: 'OK',
+    cancelLabel: 'Close',
+    confirmClass: 'btn-primary',
+    onConfirm: () => {},
+  })
+}
+
+const OPEN_NEW_PAGE_SWITCH_NOTE =
+  'Or open a new chess page and leave this game as it is — choose another mode there.'
+
 // Confirm before an action that replaces the live game in the wiki item. Skips the
-// dialog when there is no in-progress game; rated games resign on confirm when allowed.
+// dialog when there is no in-progress game (unless alwaysConfirm); rated games resign
+// on confirm when allowed. Optional altActions (e.g. "Open new page") appear on every
+// branch of the dialog.
 export function confirmLeaveOngoingGame({
   title,
   titleBlocked = 'Resign first',
   message,
   messageRated,
   messageBlocked = 'This rated game is still in progress. Resign from your seat before changing the chess item.',
+  messageIdle,
   proceedNoteRated = 'Confirming resigns for you (a loss and rating update) before continuing.',
   proceedNoteEngineRated = 'Confirming resigns for you (a loss) and updates your personal vs-Stockfish reference rating before continuing.',
   extraNotes = [],
   confirmLabel,
   confirmLabelRated,
+  confirmLabelIdle,
+  altActions = [],
+  alwaysConfirm = false,
   onProceed,
 } = {}) {
   requireHost()
-  if (pwaBrowsingPreservesOngoingGame() || !isLiveOngoingGame()) {
+  if (browsingPreservesOngoingGame()) {
     onProceed?.()
+    return
+  }
+  if (!isLiveOngoingGame()) {
+    if (!alwaysConfirm) {
+      onProceed?.()
+      return
+    }
+    app.openEmbeddedConfirmModal({
+      title,
+      message: messageIdle || message,
+      notes: [...extraNotes],
+      confirmLabel: confirmLabelIdle || confirmLabel,
+      cancelLabel: 'Cancel',
+      confirmClass: 'btn-primary',
+      altActions,
+      onConfirm: () => onProceed?.(),
+    })
     return
   }
 
@@ -384,6 +425,7 @@ export function confirmLeaveOngoingGame({
         confirmLabel: confirmLabelRated || `Resign & ${confirmLabel}`,
         cancelLabel: 'Keep playing',
         confirmClass: 'btn-danger',
+        altActions,
         onConfirm: () => {
           app.executeResignFromViewer({ onAfter: () => onProceed?.() })
         },
@@ -397,6 +439,7 @@ export function confirmLeaveOngoingGame({
       confirmLabel: 'OK',
       cancelLabel: 'Keep playing',
       confirmClass: 'btn-primary',
+      altActions,
       onConfirm: () => {},
     })
     return
@@ -418,6 +461,7 @@ export function confirmLeaveOngoingGame({
       confirmLabel: confirmLabelRated || `Resign & ${confirmLabel}`,
       cancelLabel: 'Keep playing',
       confirmClass: 'btn-danger',
+      altActions,
       onConfirm: () => {
         app.executeResignFromViewer({ onAfter: () => onProceed?.() })
       },
@@ -437,36 +481,51 @@ export function confirmLeaveOngoingGame({
     confirmLabel,
     cancelLabel: 'Keep playing',
     confirmClass: 'btn-danger',
+    altActions,
     onConfirm: () => onProceed?.(),
   })
 }
 
 // # Mode Switches
 
-// The footer "Switch Game Mode" button, from inside a game. Leaving a game for the
-// CHOOSE menu walks away from the live game, so confirm first when there's something
-// to lose. A rated (cross-wiki human) game can't simply be abandoned without a result,
-// so leaving it forces a resignation (a recorded loss) before we switch.
+// Footer "Switch Game Mode" from inside a game.
+// Wiki iframe: warn, then choose — change this item (resign first if rated; casual may
+// be clobbered) or open a New Chess Page and leave this game alone.
+// PWA / popup: browse the CHOOSE menu in-app without resigning — the game stays on its
+// page for My Chess Games.
 export function switchGameModeFromGame() {
   requireHost()
-  if (!app.isActivePage('game') || app.currentGameOutcome().over) {
-    proceedReturnToStartMenu()
+  if (app.canSpawnLineupGhostPage?.()) {
+    const openNewPageAction = {
+      label: 'Open new page',
+      className: 'btn-outline-primary',
+      title: 'Keep this game as it is and open a New Chess Page for another mode.',
+      onClick: () => app.createChooseMenuGhostPage?.(showSpawnChessPageFailed),
+    }
+    confirmLeaveOngoingGame({
+      title: 'Switch game mode?',
+      message: 'This will end the current game by changing the chess item.',
+      messageRated: 'This will end the rated game by changing the chess item.',
+      messageIdle: 'Open the mode menu on this page, or keep this item and open a new chess page.',
+      messageBlocked:
+        'This rated game is still in progress. Resign from your seat before changing this ' +
+        'chess item, or open a new page instead and leave the game as it is.',
+      proceedNoteRated:
+        'Confirming resigns for you (a loss and rating update) before returning to the game menu.',
+      proceedNoteEngineRated:
+        'Confirming resigns for you (a loss) and updates your personal vs-Stockfish reference ' +
+        'rating before returning to the game menu.',
+      extraNotes: [OPEN_NEW_PAGE_SWITCH_NOTE],
+      confirmLabel: 'Switch on this page',
+      confirmLabelRated: 'Resign & switch',
+      confirmLabelIdle: 'Switch on this page',
+      altActions: [openNewPageAction],
+      alwaysConfirm: true,
+      onProceed: () => proceedReturnToStartMenu(),
+    })
     return
   }
-  if (!isLiveOngoingGame()) {
-    proceedReturnToStartMenu()
-    return
-  }
-
-  confirmLeaveOngoingGame({
-    title: 'Switch game mode?',
-    message: 'This will end the current game by changing the chess item.',
-    messageRated: 'This will end the rated game by changing the chess item.',
-    proceedNoteRated: 'Confirming resigns for you (a loss and rating update) before returning to the game menu.',
-    confirmLabel: 'Switch game mode',
-    confirmLabelRated: 'Resign & switch',
-    onProceed: () => proceedReturnToStartMenu(),
-  })
+  proceedReturnToStartMenu()
 }
 
 // FEN last persisted on the wiki item (not the live board).

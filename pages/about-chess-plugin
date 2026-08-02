@@ -82,5 +82,97 @@
       "id": "3b7e1c9a4d2f6058",
       "text": "Because each chess item adopts its page title into the PGN tags, [[Page Title Conventions for Chess Games]] suggests how to name pages for your own games and for organized tournaments."
     }
+  ],
+  "journal": [
+    {
+      "type": "create",
+      "item": {
+        "title": "About Chess Plugin",
+        "story": [
+          {
+            "type": "paragraph",
+            "id": "907c018ccbc2779d",
+            "text": "Play and record chess games directly on Federated Wiki pages. Each game lives in a wiki item as standard PGN, so moves are stored in the page's journal and travel with the page across the federation. You can play against the built-in Stockfish engine, study a position with the FEN editor, or play another person across wikis — claim an open seat (White or Black) on a forked page and continue the game from your own copy. A popup \"mirror\" window gives you a larger board that stays in sync with the page and can be installed as a PWA for offline play. Source: [https://www.npmjs.com/package/wiki-plugin-chess NPM]."
+          },
+          {
+            "type": "paragraph",
+            "id": "1a9c0b36758d4e2f",
+            "text": "The first word of a chess item's text can be a keyword that chooses a mode of play to switch to (see [[Chess Keyword Examples]] for live demos). Otherwise the text is parsed as PGN, FEN, or figurine notation. If the item's text is unrecognizable, a menu appears so you can choose how to proceed."
+          },
+          {
+            "type": "pagefold",
+            "id": "80e31b02881be14d",
+            "text": "KEYWORDS"
+          },
+          {
+            "type": "markdown",
+            "id": "c0d3b56704e2f1a9",
+            "text": "`CHOOSE` - puts a menu in the chess item to pick which game mode to switch to."
+          },
+          {
+            "type": "markdown",
+            "id": "b444b51054f14644",
+            "text": "`GAME` - starts a new game with the settings of your choice. Edits to the game are stored as PGN in the chess item text, and actions in the wiki journal."
+          },
+          {
+            "type": "markdown",
+            "id": "d2618fcc113b4831",
+            "text": "`POSITION` - opens the FEN position editor."
+          },
+          {
+            "type": "markdown",
+            "id": "2ce1c0ed5dcf3a99",
+            "text": "`PUZZLE` - opens the chess puzzle mode. When online, puzzles are drawn from your wiki farm's shared database (if enabled) or the [https://database.lichess.org/#puzzles Lichess puzzle API]. One item can combine rating/theme filters, inline JSONL custom puzzles, positions curated from old games, and `pages=` references to larger annotated puzzle pages. The first inline puzzle leads, then matching curated and Lichess/farm puzzles alternate — see [[Chess Keyword Examples]]. An installed PWA can also use a separately downloaded puzzle database offline."
+          },
+          {
+            "type": "markdown",
+            "id": "e1d7b3a2c0f49568",
+            "text": "`SURVEY` - a chess item with this keyword is on your [[My Chess Games]] page by default. It helps you track completed and ongoing chess games on your site. Open challenges you post are stored on that item's metadata, not as extra chess items on the page."
+          },
+          {
+            "type": "pagefold",
+            "id": "4702118cef7cc66e",
+            "text": "Example PGN notation:"
+          },
+          {
+            "type": "code",
+            "id": "ce4a6fd32426ef6b",
+            "text": "[Event \"About Chess Plugin\"]\n[Site \"http://localhost:3001 (id: c8d4f02a13e95c27)\"]\n[Date \"2026.06.22\"]\n[Round \"-\"]\n[White \"localhost:3001 (Rob)\"]\n[Black \"Stockfish Level 3\"]\n[Result \"*\"]\n\n*",
+            "language": "PGN"
+          },
+          {
+            "type": "markdown",
+            "id": "e2f1a9c0d3b56704",
+            "text": "PGN has many \"tags\" but the `White` and `Black` tags, representing the players, are important to how Federated Wiki Chess works. Each wiki player is identified by their wiki domain in the tag. The name in parentheses is the display name from their site (Which can change). The domain of the site that created the game, with the chess item's ID in brackets, is stored in the `Site` tag."
+          },
+          {
+            "type": "markdown",
+            "id": "04e2f1a9c0d3b567",
+            "text": "If you play while signed in to your wiki, moves autosave to the journal (There is a game setting to turn on a move confirmation step if you prefer). You can open the chess app in a larger popup window that stays in sync with the wiki page. You can play in either place and the item text updates on your wiki page. You can install Federated Wiki Chess as a Progressive Web App (PWA) from the popup window for offline play against the Stockfish engine, and for chess puzzles after you download the puzzle database to your device. Fork another wiki's page with a chess game to your site and you can take a seat as White or Black if you are not already a player, then continue from your copy. If both players keep forks of each other's pages, they can play correspondence by watching for updates on each other's sites. When both players enable the game setting to auto-fork each other's moves, the app can upgrade to a direct WebRTC link for real-time play; the journal still records every move."
+          },
+          {
+            "type": "paragraph",
+            "id": "f8a2c91e04b3d760",
+            "text": "When you paste text onto the chess app interface (including in a popup or installed PWA), it's parsed to see if it's PGN, FEN, or figurine notation. If the paste is identified as chess data, you are asked if you want to switch to the corresponding mode (GAME, POSITION)."
+          },
+          {
+            "type": "markdown",
+            "id": "a4b5c6d7e8f90123",
+            "text": "Rated games between humans use the Glicko-2 rating system (not Elo): Each player tracks three numbers: *rating* (`r`), *rating deviation* (`RD` = uncertainty), and *volatility* (`σ`). High RD shows a `?` marker (meaning provisional). Everyone starts at 1500; a rating stays provisional until enough twin-verified human games clear it. Stockfish games update a separate personal vs-Stockfish reference rating in your browser (IndexedDB) but never change your federated rating or count on the leaderboards. The ranked board only includes games that exist as reconciling records on both players' wikis; playing a rated game opts your site in. Browse rankings from the chess app menu or the [[Chess Leaderboards]] page (`LEADERBOARD` keyword)."
+          },
+          {
+            "type": "chess",
+            "id": "c8d4f02a13e95c27",
+            "text": "CHOOSE"
+          },
+          {
+            "type": "paragraph",
+            "id": "3b7e1c9a4d2f6058",
+            "text": "Because each chess item adopts its page title into the PGN tags, [[Page Title Conventions for Chess Games]] suggests how to name pages for your own games and for organized tournaments."
+          }
+        ]
+      },
+      "date": 1783052203000
+    }
   ]
 }

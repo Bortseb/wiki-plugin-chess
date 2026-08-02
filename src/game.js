@@ -40,6 +40,7 @@ import {
   formatPgn,
   getFormat,
   getSeatClaimOffer,
+  canClaimOpenSeatAsViewer,
   claimSeat,
   formatPlayerId,
   buildStartPgn,
@@ -123,6 +124,7 @@ import {
   CHALLENGE_REJECT_ABOVE_MAX,
   CHALLENGE_REJECT_UNKNOWN_RATING,
   CHALLENGE_REJECT_OWNERS_ONLY,
+  CHALLENGE_REJECT_WRONG_SITE,
   proposeNewGamePageTitle,
   isReplaceableGhostPageTitle,
   resolveStartModalPageTitle,
@@ -153,7 +155,7 @@ import {
   addPostedOpenChallengeLocally,
   keepSiteSurveySnapshotOnReturn,
 } from './survey.js'
-import { returnToStartMenu, clearBrowseStartMenuState, confirmLeaveOngoingGame } from './choose-menu.js'
+import { returnToStartMenu, clearBrowseStartMenuState } from './choose-menu.js'
 
 import { bumpGameSyncEpoch, shelterRealtimeBoardBadge, updateRealtimeBoardBadge } from './realtime.js'
 
@@ -589,10 +591,18 @@ function viewerControlsSeat(playerTag) {
   }
   // After sign-in (or a local fork), keep controlling the plain guest seat until it is
   // rewritten to a wiki seat — otherwise moves lock mid-game while the label still says Guest.
+  // Skip when we already hold the other seat as a wiki identity (opponent joined as Guest).
   if (
     (viewerCanJournalAsOwner() || chessState()?.guestLocalStoragePersist) &&
     isPlainGuestSeatTag(playerTag, guestPlayerName())
   ) {
+    const pgn = chessState()?.PGN || chessState()?.chessState
+    if (pgn) {
+      const white = getPgnTag(pgn, 'White')
+      const black = getPgnTag(pgn, 'Black')
+      const other = playerTag === white ? black : playerTag === black ? white : null
+      if (other && playerTagOnViewingWikiSite(other, viewingSite())) return false
+    }
     return true
   }
   // Owners and local-fork guests persist through pageOnThisWiki / guestLocalStoragePersist; match the
@@ -901,9 +911,18 @@ function maybePublishPageOpenChallenge(pgn) {
 
 function applySeatClaim(seat) {
   syncViewerAuthFromParent()
+  const pgnBefore = chessState().PGN
+  if (
+    !canClaimOpenSeatAsViewer(pgnBefore, {
+      viewingSite: viewingSite(),
+      isAuthenticatedOwner: Boolean(viewerCanJournalAsOwner()),
+    })
+  ) {
+    return
+  }
   // A guest claiming a seat remembers their name in this browser for next time.
   if (isGuestViewer()) rememberGuestPlayerName(guestPlayerName())
-  let claimed = claimSeat(chessState().PGN, seat, {
+  let claimed = claimSeat(pgnBefore, seat, {
     signedInDisplayName: chessState().signedInDisplayName || liveParentAuth().ownerName,
     wikiSite: pgnStampSite(),
     ...localSeatIdentityContext(),
@@ -1113,20 +1132,40 @@ function showNewGameSetupModal({ defaultOpponent = null } = {}) {
   })
 }
 
+function showSpawnGamePageFailed() {
+  const canPublish = Boolean(app.canPublish?.())
+  app.openEmbeddedConfirmModal?.({
+    title: 'Could not open a new chess game',
+    message: canPublish
+      ? 'Try again or refresh the wiki page.'
+      : 'Sign in on your wiki to add a new chess page.',
+    confirmLabel: 'OK',
+    cancelLabel: 'Close',
+    confirmClass: 'btn-primary',
+    onConfirm: () => {},
+  })
+}
+
 function openNewGameSetupPanel({ defaultOpponent = null, skipLeaveConfirm = false } = {}) {
   if (skipLeaveConfirm) {
     showNewGameSetupModal({ defaultOpponent })
     return
   }
-  confirmLeaveOngoingGame({
-    title: 'Start a new game?',
-    message: 'This will end the current game by changing the chess item.',
-    messageRated: 'This will end the rated game by changing the chess item.',
-    proceedNoteRated: 'Confirming resigns for you (a loss and rating update) before opening the new-game setup.',
-    confirmLabel: 'Start new game',
-    confirmLabelRated: 'Resign & start new',
-    onProceed: () => showNewGameSetupModal({ defaultOpponent }),
-  })
+  // Wiki iframe: spawn a New Chess Game page (bare GAME → start-game modal). Leave the
+  // current game running on its own page.
+  if (app.canSpawnLineupGhostPage?.()) {
+    app.createGameGhostPage?.(showSpawnGamePageFailed)
+    return
+  }
+  // Installed PWA: start a local new-game session so the wiki-backed game stays findable.
+  if (app.pwaBridgeActive) {
+    app.flushGameBeforeBrowse?.()
+    app.startChessItemFromChooseMenu?.('game')
+    return
+  }
+  // Popup / other: persist the current game first, then open setup without resigning.
+  if (app.isWikiPopup) app.flushGameBeforeBrowse?.()
+  showNewGameSetupModal({ defaultOpponent })
 }
 
 // Default new-game / open-challenge form values (start menu + post open challenge).
@@ -1502,9 +1541,14 @@ function challengeRejectMessage(reason, challenge) {
     return 'This challenge has a rating requirement, but you have no rating yet. Play a rated game first.'
   }
   if (reason === CHALLENGE_REJECT_OWNERS_ONLY) {
-    return challenge?.config?.rated
-      ? 'Rated challenges are for signed-in wiki owners only. Sign in as a wiki owner to join.'
-      : 'This challenge is for signed-in wiki owners only. Sign in as a wiki owner to join.'
+    if (challenge?.challengeTarget) {
+      return `This challenge is for the signed-in owner of ${challenge.challengeTarget}. Sign in on that wiki to accept.`
+    }
+    return 'Open challenges are for signed-in wiki owners only. Sign in as a wiki owner to join.'
+  }
+  if (reason === CHALLENGE_REJECT_WRONG_SITE) {
+    const target = challenge?.challengeTarget || 'the invited wiki'
+    return `This challenge is for the owner of ${target}. Open it from that wiki while signed in.`
   }
   return "You can't join this challenge."
 }
@@ -1606,6 +1650,7 @@ function renderOpenChallengeBanner(banner, challenge) {
     const gate = challengeJoinGate(challenge, {
       viewerRating,
       isAuthenticatedOwner: Boolean(viewerCanJournalAsOwner()),
+      viewingSite: viewingSite(),
     })
     const canClaim = Boolean(getSeatClaimContext()?.options.length)
     if (gate.ok && canClaim) {
@@ -1701,6 +1746,7 @@ function acceptOpenChallengeAsViewer() {
     !challengeJoinGate(challenge, {
       viewerRating,
       isAuthenticatedOwner: Boolean(viewerCanJournalAsOwner()),
+      viewingSite: viewingSite(),
     }).ok
   ) {
     return
@@ -1765,7 +1811,6 @@ function editOpenChallenge() {
     openChallengeEditModal,
     {
       rated: cfg.rated,
-      allowGuests: cfg.allowGuests !== false,
       creatorColor: cfg.creatorColor,
       minRating: cfg.minRating,
       maxRating: cfg.maxRating,
@@ -1779,20 +1824,20 @@ function editOpenChallenge() {
 // (persisted via CHALLENGE_CHANGED), so a range-only change needs no board rewrite. A
 // colour change re-seats the creator on the chosen side (White for 'random', as on
 // creation) and opens the other seat, which does autosave the board.
-function applyChallengeEdit({ rated, allowGuests, creatorColor, minRating, maxRating }) {
+function applyChallengeEdit({ rated, creatorColor, minRating, maxRating }) {
   const challenge = currentChallenge()
   const pgn = chessState()?.PGN || chessState()?.chessState
   if (!chessState() || !pgn || !challenge || !isOpenChallenge(challenge)) return
 
   const updated = buildOpenChallenge({
     rated,
-    allowGuests,
     creatorColor,
     minRating,
     maxRating,
     creatorId: challenge.creator.id,
-    creatorSite: challenge.creator.site ?? challenge.creator.host,
+    creatorSite: challenge.creator.site,
     creatorRating: challenge.creator.rating,
+    challengeTarget: challenge.challengeTarget || '',
     ts: challenge.ts || Date.now(),
   })
   if (!updated) return
@@ -2685,12 +2730,18 @@ function openGameCommentModal() {
   if (!canAddMoveComments()) return
   const move = viewedCommentMove()
   if (!move) return
-  openCommentModal({
-    moveLabel: moveLabelForPly(commentCtx.chessConsole.state.plyViewed, move),
-    annotatorName: currentAnnotatorName(),
-    existing: moveCommentText(move),
-    onSubmit: addCommentToViewedMove,
-  })
+  // Board overlay keeps the composer over the live board / just above the blue
+  // comment bar — not an in-flow dialog appended under Attributions.
+  BoardLayout.openBoardOverlayConfirmModal(
+    openCommentModal,
+    {
+      moveLabel: moveLabelForPly(commentCtx.chessConsole.state.plyViewed, move),
+      annotatorName: currentAnnotatorName(),
+      existing: moveCommentText(move),
+      onSubmit: addCommentToViewedMove,
+    },
+    notifyWikiHeight,
+  )
 }
 
 function addCommentToViewedMove(text) {
@@ -2944,7 +2995,6 @@ function seedPageBackedOpenChallenge({ stampedPgn, challenge, host } = {}) {
 
 function finishOpenChallenge({
   rated = false,
-  allowGuests = true,
   creatorColor = CHALLENGE_COLOR_RANDOM,
   minRating = '',
   maxRating = '',
@@ -2955,7 +3005,7 @@ function finishOpenChallenge({
   title = '',
 } = {}) {
   const startFen = fen || app.fenEditor?.state?.fen?.toString() || START_FEN
-  // Blank ChallengeTarget = open federation seek (anyone can accept).
+  // Blank ChallengeTarget = open federation seek (signed-in wiki owners can accept).
   const directedChallengeTarget = normalizeWikiSiteInput(challengeTarget) || ''
   // Guests / foreign hosts can't journal a federated challenge. Keep a human open-seat
   // game locally — never seat Stockfish after the user picked Human.
@@ -2980,7 +3030,6 @@ function finishOpenChallenge({
   const creatorId = localSeatId()
   const challenge = buildOpenChallenge({
     rated,
-    allowGuests: rated ? false : allowGuests !== false,
     creatorColor,
     minRating,
     maxRating,
@@ -3622,11 +3671,6 @@ function updatePositionOpponentUI() {
   // Human remote challenges use open-challenge format/color/rating-range fields until
   // an opponent accepts. Engine games always track vs-Stockfish rating (no format picker).
   if (challengeWrap) challengeWrap.hidden = !fields.showChallengeWrap
-  const allowGuestsWrap = document.getElementById('positionChallengeAllowGuestsWrap')
-  const allowGuestsCheck = document.getElementById('positionChallengeAllowGuests')
-  const challengeRated = document.getElementById('positionChallengeRated')?.value === 'rated'
-  if (allowGuestsWrap) allowGuestsWrap.hidden = !fields.showChallengeWrap || challengeRated
-  if (allowGuestsCheck && challengeRated) allowGuestsCheck.checked = false
   if (levelWrap) levelWrap.hidden = !fields.showLevelWrap
   if (humanPlayWrap) humanPlayWrap.hidden = !fields.showHumanPlayWrap
   const sameDeviceWrap = document.getElementById('positionSameDeviceWrap')
@@ -3849,12 +3893,10 @@ export function wirePositionEditor() {
     // becomes "… vs Stockfish …" and rated/color/range revert to defaults).
     const openChallengeTitle = String(chessState()?.wikiPageTitle || readStartModalPageTitle() || '').trim()
     const openChallengeRated = document.getElementById('positionChallengeRated')?.value === 'rated'
-    const openChallengeAllowGuests =
-      !openChallengeRated && document.getElementById('positionChallengeAllowGuests')?.checked !== false
+    const openChallengeTarget = modalFields.normalizedWikiSite || ''
     const openChallengeCreatorColor = document.getElementById('positionChallengeColor')?.value || CHALLENGE_COLOR_RANDOM
     const openChallengeMinRating = document.getElementById('positionChallengeMin')?.value ?? ''
     const openChallengeMaxRating = document.getElementById('positionChallengeMax')?.value ?? ''
-    const openChallengeTarget = modalFields.normalizedWikiSite || ''
     // closePositionStartModal resets color/rated/opponent — read start choices first.
     const colorChoice = readStartModalColorChoice(modalFields)
     const stockfishLevel = parseInt(levelSelect.value, 10) || 1
@@ -3918,7 +3960,6 @@ export function wirePositionEditor() {
       confirmOpenChallenge({
         title: openChallengeTitle,
         rated: openChallengeRated,
-        allowGuests: openChallengeAllowGuests,
         creatorColor: openChallengeCreatorColor,
         minRating: openChallengeMinRating,
         maxRating: openChallengeMaxRating,
@@ -4052,8 +4093,12 @@ export async function createWikiChessConsole(parsedPGN) {
         showCoordinates: true,
         pieces: { file: getPieceSetFile() },
       },
-    }).initialized.then(() => {
+    }).initialized.then(async () => {
       if (setupGen !== sessionConsoleGeneration(app.chessSession.getState())) return
+      // Sprite may still be in-flight if survey/board raced the same wrapper; wait then
+      // repaint so cold loads without a SW do not keep a blank piece layer.
+      await ensurePieceSpriteCached(getPieceSpritesUrl()).catch(() => {})
+      app.chessConsole.components?.board?.chessboard?.view?.redrawPieces?.()
       enhancePlayerLabels(app.chessConsole)
       // Wire journal autosave before initGame so Stockfish's opening reply (when the
       // human plays Black) is not missed while the engine move is being applied.

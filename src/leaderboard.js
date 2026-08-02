@@ -26,6 +26,8 @@ import {
   normalizeNeighborhoodGraphOpts,
   previewHopTrustSchedule,
   HOP_TRUST_FLOOR,
+  fetchFarmPeerSites,
+  dedupeSites,
 } from './federation.js'
 import { wikiSitePageUrl, wikiSiteLinkLabel, wikiSiteLinkTarget } from './chess-core.js'
 import { openLeaderboardGateModal, closeActiveModal, clearViewportBlockingModals } from './modals.js'
@@ -72,15 +74,18 @@ export function initLeaderboardUi(context) {
     renderLbUpdating,
     renderHopGraphPanel,
     renderAddOpponentsToNeighborhoodButton,
+    renderAddPeersToNeighborhoodButton,
     ensureLeaderboardTableHead,
     wireLeaderboardTableResize,
     wireHopGraphDials,
     syncHopGraphInputs,
     cancelScheduledHopGraphRecrawl,
     addPastOpponentsToNeighborhood,
+    addFarmPeersToNeighborhood,
     closeGate,
     openLeaderboardInWiki,
   })
+  void warmFarmPeerSitesCache()
 }
 
 // # Opt In Gate and Federated Entry Points
@@ -91,7 +96,7 @@ let gateEmbedded = false
 let gateRestore = null
 
 export function openLeaderboardInWiki() {
-  if (!isPrimaryEmbedSurface()) return
+  if (!ctx?.isWikiEmbed || !ctx?.wikiFrame) return
   shellMessenger()?.openLeaderboardPage({ view: true })
 }
 
@@ -102,7 +107,8 @@ export function openLeaderboardFromChooseMenu() {
     openLeaderboard()
     return
   }
-  if (isPrimaryEmbedSurface()) {
+  // Wiki iframe: open Chess Leaderboards in the lineup (not an in-iframe swap).
+  if (ctx?.isWikiEmbed) {
     openLeaderboardInWiki()
     return
   }
@@ -135,10 +141,10 @@ function openGate() {
     return
   }
   // Visitors who aren't signed in (or can't journal here) can't play rated games on
-  // this site — skip the opt-in modal and open the board the same as "View leaderboards".
+  // this site — skip the opt-in modal and open Past opponents (same landing as owners).
   if (!shouldShowLeaderboardOptInGate()) {
     closeGate()
-    viewBoard({ reach: 'survey' })
+    viewBoard({ reach: 'mine' })
     return
   }
   if (canProbe) {
@@ -180,7 +186,7 @@ function renderGate() {
   }
   if (!shouldShowLeaderboardOptInGate()) {
     closeGate()
-    viewBoard({ reach: 'survey' })
+    viewBoard({ reach: 'mine' })
     return
   }
   closeActiveModal({ discardSuspended: true, restoreMount: false })
@@ -192,7 +198,7 @@ function renderGate() {
     embedded: gateEmbedded,
     onView: () => {
       closeGate()
-      viewBoard({ reach: hasRatedGame ? 'mine' : 'survey' })
+      viewBoard({ reach: 'mine' })
     },
     onCancel: () => {
       closeGate()
@@ -557,6 +563,82 @@ function addPastOpponentsToNeighborhood() {
   })
 }
 
+let farmPeerSitesCache = null
+let farmPeerSitesWarmInFlight = false
+
+async function warmFarmPeerSitesCache() {
+  if (farmPeerSitesWarmInFlight) return farmPeerSitesCache || []
+  if (Array.isArray(farmPeerSitesCache)) return farmPeerSitesCache
+  farmPeerSitesWarmInFlight = true
+  try {
+    const localSite = String(ctx?.viewingSite?.() || (typeof location !== 'undefined' ? location.host : '') || '')
+      .trim()
+      .toLowerCase()
+    farmPeerSitesCache = await fetchFarmPeerSites({ localSite })
+  } catch {
+    farmPeerSitesCache = []
+  } finally {
+    farmPeerSitesWarmInFlight = false
+  }
+  renderAddPeersToNeighborhoodButton()
+  return farmPeerSitesCache
+}
+
+function currentNeighborhoodSites() {
+  const { lbMeta, lbBoardCache } = lbSnapshot()
+  return dedupeSites([
+    ...(Array.isArray(lbMeta?.neighborhoodSites) ? lbMeta.neighborhoodSites : []),
+    ...(Array.isArray(lbBoardCache.neighborhood?.meta?.neighborhoodSites)
+      ? lbBoardCache.neighborhood.meta.neighborhoodSites
+      : []),
+    ...(Array.isArray(lbBoardCache.survey?.meta?.neighborhoodSites)
+      ? lbBoardCache.survey.meta.neighborhoodSites
+      : []),
+  ])
+}
+
+function farmPeersMissingFromNeighborhood() {
+  const localSite = String(ctx?.viewingSite?.() || '')
+    .trim()
+    .toLowerCase()
+  const peers = Array.isArray(farmPeerSitesCache) ? farmPeerSitesCache : []
+  if (!peers.length) return []
+  const neighborhoodSites = currentNeighborhoodSites()
+  const missing = []
+  const seen = new Set()
+  for (const host of peers) {
+    const h = cleanSite(host)
+    if (!h || seen.has(h) || sitesMatch(h, localSite)) continue
+    if (neighborhoodSites.some(n => sitesMatch(n, h))) continue
+    seen.add(h)
+    missing.push(h)
+  }
+  return missing
+}
+
+function addFarmPeersToNeighborhood() {
+  const hosts = farmPeersMissingFromNeighborhood()
+  if (!hosts.length || !shellMessenger()) return
+  shellMessenger().registerNeighbors({ hosts })
+  const { lbBoardCache } = lbSnapshot()
+  lbBoardCache.neighborhood = null
+  if (lbBoardCache.survey?.meta) {
+    lbBoardCache.survey.meta.neighborhoodSites = dedupeSites([
+      ...(Array.isArray(lbBoardCache.survey.meta.neighborhoodSites)
+        ? lbBoardCache.survey.meta.neighborhoodSites
+        : []),
+      ...hosts,
+    ])
+  }
+  requestBoard({
+    force: true,
+    restart: true,
+    deepRecompute: false,
+    syncSurvey: false,
+    extraNeighborhoodSites: hosts,
+  })
+}
+
 function renderAddOpponentsToNeighborhoodButton() {
   const btn = el('wikiChessLbAddOpponents')
   if (!btn) return
@@ -573,6 +655,26 @@ function renderAddOpponentsToNeighborhoodButton() {
   btn.disabled = lbLoading
   btn.title = show
     ? `Register ${missing.length} past ${missing.length === 1 ? 'opponent' : 'opponents'} as wiki neighbours`
+    : ''
+}
+
+function renderAddPeersToNeighborhoodButton() {
+  const btn = el('wikiChessLbAddPeers')
+  if (!btn) return
+  if (!Array.isArray(farmPeerSitesCache) && !farmPeerSitesWarmInFlight) void warmFarmPeerSitesCache()
+  const { viewKind, mode, lbMeta, lbLoading } = lbSnapshot()
+  const missing = farmPeersMissingFromNeighborhood()
+  const show =
+    viewKind === 'federatedLeaderboard' &&
+    mode === 'neighborhood' &&
+    !lbMeta?.wrongPage &&
+    !isInAppSurveySurface() &&
+    !!ctx?.wikiFrame &&
+    missing.length > 0
+  btn.hidden = !show
+  btn.disabled = lbLoading
+  btn.title = show
+    ? `Register ${missing.length} farm ${missing.length === 1 ? 'peer' : 'peers'} from the Present plugin as wiki neighbours`
     : ''
 }
 
@@ -800,7 +902,7 @@ function colClassFor(columnId) {
 
 function lbRowFor(entry, ownSite) {
   const tr = document.createElement('tr')
-  const site = entry.site ?? entry.host ?? ''
+  const site = entry.site ?? ''
   if (ownSite && hostEq(site, ownSite)) tr.classList.add('wiki-chess-lb-you')
 
   for (const col of LEADERBOARD_COLUMNS) {

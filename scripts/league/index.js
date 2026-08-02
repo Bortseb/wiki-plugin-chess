@@ -19,6 +19,9 @@ import {
   rebuildStoryFromJournal,
   chessJournalSymbol,
   isOwnCorrespondencePly,
+  pgnDateTag,
+  pgnUtcDateTag,
+  pgnUtcTimeTag,
 } from '../../src/chess-core.js'
 import {
   newRatingState,
@@ -208,9 +211,9 @@ function randHex(rng, len = 16) {
 }
 
 // ---------------------------------------------------------------------------
-// Dates — every game's timestamp is the UTC midnight of its Date tag, matching how
-// the leaderboard reads pgnTimestamp(). The final round lands on "today" so the
-// freshest games read as un-decayed on the board.
+// Dates — season games land on UTC midnights so pgnTimestamp() / Glicko decay stay
+// stable. Stamp the same start instant live games use: local Date + UTCDate/UTCTime.
+// TerminationTimestamp is applied later (at the correspondence completion instant).
 // ---------------------------------------------------------------------------
 
 function pgnDate(ms) {
@@ -219,6 +222,15 @@ function pgnDate(ms) {
   const m = String(d.getUTCMonth() + 1).padStart(2, '0')
   const day = String(d.getUTCDate()).padStart(2, '0')
   return `${y}.${m}.${day}`
+}
+
+function pgnStartTags(ms) {
+  const d = new Date(ms)
+  return {
+    Date: pgnDateTag(d),
+    UTCDate: pgnUtcDateTag(d),
+    UTCTime: pgnUtcTimeTag(d),
+  }
 }
 
 function utcMidnight(ms) {
@@ -1467,7 +1479,7 @@ async function playGame(rng, opts, pool, white, black, dateMs, meta = {}) {
     // only "White vs Black" — uniqueness suffixes never land in these tags.
     Event: tournament?.name || 'Federated Wiki Chess',
     Site: `http://${white.host} (id: ${itemId})`,
-    Date: pgnDate(dateMs),
+    ...pgnStartTags(dateMs),
     Round: tournament ? String(round) : '-',
     White: `${white.host} (${white.name})`,
     Black: `${black.host} (${black.name})`,
@@ -1626,7 +1638,7 @@ async function playCasualGames(opts, rng, pool, players) {
       const tags = {
         Event: 'Federated Wiki Chess',
         Site: `http://${white.host} (id: ${itemId})`,
-        Date: pgnDate(dateMs),
+        ...pgnStartTags(dateMs),
         Round: '-',
         White: `${white.host} (${white.name})`,
         Black: `${black.host} (${black.name})`,
@@ -1839,7 +1851,7 @@ function uniqueGameTitles(games) {
 
 function federationTopTiers(entries) {
   return (Array.isArray(entries) ? entries : []).slice(0, 50).map(e => ({
-    site: e.site ?? e.host,
+    site: e.site,
     rating: Math.round(Number(e.rating) || 0),
     rd: Math.round(Number(e.rd) || 0),
   }))
@@ -2623,7 +2635,6 @@ function printBoard(players, _opts) {
         reliable: isReliable(state),
         name: p.name,
         site: p.host,
-        host: p.host,
       }
     })
     .sort((a, b) => b.rating - a.rating || String(a.site).localeCompare(String(b.site)))
@@ -2638,7 +2649,7 @@ function printBoard(players, _opts) {
     const rank = String(e.rank).padStart(2)
     const rating = `${e.rating}${e.provisional ? '?' : ' '}`.padStart(6)
     const name = String(e.name).padEnd(20).slice(0, 20)
-    console.log(` ${rank}  ${rating}  ${name}   ${e.site ?? e.host}`)
+    console.log(` ${rank}  ${rating}  ${name}   ${e.site}`)
   }
   console.log('-'.repeat(64))
   const reliable = entries.filter(e => e.reliable).length

@@ -75,6 +75,7 @@ import { openPasteConfirmModal, openAlertModal } from './modals.js'
 import {
   normalizeChallengeState,
   isOpenChallenge,
+  challengeJoinGate,
   proposeOpenChallengePageTitle,
   openChallengeDisplayTitle,
   proposeUniquePageTitle,
@@ -101,6 +102,7 @@ import {
   DEFAULT_SURVEY_ID,
   buildFetchTargets,
   resolveFetchSeeds,
+  fetchFarmPeerSites,
   orchestrateSiteSurveyDeferredWork,
   runNeighborhoodJob,
   refreshFederationSitesFromIndex,
@@ -143,8 +145,6 @@ const CHESS_ITEM_EDIT_HINT = 'double-click here to edit chess item'
 // scrollbar gutter — see comment on the rule below.
 // Shell paste modals mount inside this root — never as fixed overlays on `document.body`.
 const ensureChessItemStyles = $host => {
-  // Drop legacy global inject from earlier builds (was appended to document.head).
-  document.getElementById('wiki-chess-item-styles')?.remove()
   const hostEl = $host?.jquery ? $host[0] : $host
   if (!hostEl?.appendChild) return
   const css = `
@@ -1679,7 +1679,7 @@ const canPersistJoinGhostJournal = ctx => {
   const local = String(location.host || '')
     .trim()
     .toLowerCase()
-  const joinerSite = cleanSite(ctx.item?.challenge?.opponent?.site ?? ctx.item?.challenge?.opponent?.host)
+  const joinerSite = cleanSite(ctx.item?.challenge?.opponent?.site)
   return Boolean(local && joinerSite && sitesMatch(joinerSite, local))
 }
 
@@ -1876,6 +1876,26 @@ const persistRebuiltSurveyGameIndex = (localSite, rebuiltGameIndex) => {
   }
   putChessPageCharmPatch(SURVEY_PAGE_SLUG, { gameIndex: rebuiltGameIndex }, err => {
     if (err && wiki.debug) console.log('persistRebuiltSurveyGameIndex error', err)
+  })
+}
+
+// Persist pruned open challenges after site survey (hides stale SURVEY-item seeks).
+const persistSurveyOpenChallenges = (localSite, openChallenges) => {
+  const host = String(localSite || '')
+    .trim()
+    .toLowerCase()
+  if (
+    !host ||
+    host !==
+      String(location.host || '')
+        .trim()
+        .toLowerCase() ||
+    !Array.isArray(openChallenges)
+  ) {
+    return
+  }
+  putChessPageCharmPatch(SURVEY_PAGE_SLUG, { openChallenges }, err => {
+    if (err && wiki.debug) console.log('persistSurveyOpenChallenges error', err)
   })
 }
 
@@ -2259,14 +2279,31 @@ const emit = async ($item, item, { forceRebuild = false } = {}) => {
     class: 'chess-board-frame',
     scrolling: 'no',
     style: 'width:100%;border:0;overflow:hidden;display:block;height:280px;',
-    src: `//${location.host}/plugins/chess/index.html?itemId=${encodeURIComponent(item.id)}&pageKey=${encodeURIComponent(pageKey)}&v=${encodeURIComponent(pluginBuildId)}${params ? '&' + params.slice(1) : ''}`,
+    src: `/plugins/chess/index.html?itemId=${encodeURIComponent(item.id)}&pageKey=${encodeURIComponent(pageKey)}&v=${encodeURIComponent(pluginBuildId)}${params ? '&' + params.slice(1) : ''}`,
   })
   itemLive.iframe.on('load', () => {
     itemLive.$item?.find('.wiki-chess-embed-loading-text').text('Starting Federated Wiki Chess…')
     announceWikiTabToChessOpener(itemLive)
     // chess-app.js may still be loading when 'load' fires; retry until the iframe boots.
     const retryEmbedBoot = (attempt = 0) => {
-      if (itemLive.embedLoadingCleared || !itemLive.iframe?.[0]?.contentWindow || attempt > 30) return
+      if (itemLive.embedLoadingCleared || !itemLive.iframe?.[0]?.contentWindow) return
+      // ~24s, then one iframe reload before giving up (slow SW/cache warm on first offline open).
+      if (attempt > 60) {
+        if (!itemLive.embedReloadTried) {
+          itemLive.embedReloadTried = true
+          try {
+            itemLive.iframe[0].contentWindow.location.reload()
+          } catch {
+            /* ignore */
+          }
+          window.setTimeout(() => retryEmbedBoot(0), 800)
+          return
+        }
+        itemLive.$item
+          ?.find('.wiki-chess-embed-loading-text')
+          .text('Chess is taking too long to start. Check your connection, then reopen this page.')
+        return
+      }
       try {
         sendMessage(itemLive, MSG.SET_STATE, attempt > 0 ? { patchStateOnly: true } : {})
       } catch {
@@ -2275,6 +2312,11 @@ const emit = async ($item, item, { forceRebuild = false } = {}) => {
       if (!itemLive.embedLoadingCleared) window.setTimeout(() => retryEmbedBoot(attempt + 1), 400)
     }
     window.setTimeout(() => retryEmbedBoot(0), 200)
+  })
+  itemLive.iframe.on('error', () => {
+    itemLive.$item
+      ?.find('.wiki-chess-embed-loading-text')
+      .text('Could not load the chess board (missing offline assets?). Open this page online once, then try again.')
   })
 
   const $root = appendChessPluginDom($item, itemLive, { loading: true })
@@ -3127,8 +3169,8 @@ const pollRemoteOpponent = ctx => {
 // Wiki-style page fork from the opponent: replace this page with their copy, then
 // stamp `{ type: 'fork', site }`. Matches the lineup "fork" button — journals
 // converge with both sites' flags — unlike a surgical edit+forkSite stamp.
-const forkRemoteOpponentPage = (ctx, { host, expectText = null } = {}, done) => {
-  const remoteSite = String(host || ctx?.remoteWatchSite || '').trim()
+const forkRemoteOpponentPage = (ctx, { site, expectText = null } = {}, done) => {
+  const remoteSite = String(site || ctx?.remoteWatchSite || '').trim()
   const $page = ctx?.$item?.parents?.('.page:first')
   const slug = getPageSlug(ctx?.$item) ?? ctx?.chessObj?.wikiPageName
   if (!ctx || !remoteSite || !$page?.length || !slug) {
@@ -3204,10 +3246,13 @@ const forkRemoteOpponentPage = (ctx, { host, expectText = null } = {}, done) => 
       const preservedSettings = ctx.chessObj?.gameSettings
       if (nextItem) {
         Object.assign(ctx.item, nextItem)
-        mergeItemTextIntoChessObj(ctx.chessObj, nextItem.text)
+        // mergeItemTextIntoChessObj returns a new object — assign it or SET_STATE keeps the
+        // pre-fork PGN and the board stays stale until a full page refresh.
+        ctx.chessObj = mergeItemTextIntoChessObj(ctx.chessObj, nextItem.text)
         if (nextItem.challenge !== undefined) ctx.chessObj.challenge = nextItem.challenge
         // Remote items usually have gameSettings: null — do not wipe local auto-fork prefs.
         ctx.chessObj.gameSettings = coalesceAdoptedGameSettings(nextItem.gameSettings, preservedSettings)
+        ctx.emitKey = chessEmitKeyFor(ctx.item, ctx.$item)
       }
       // patchStateOnly: update the board/PGN without a full iframe re-init (keeps settings UI stable).
       sendMessage(ctx, MSG.SET_STATE, { patchStateOnly: true })
@@ -3224,12 +3269,11 @@ const forkRemoteOpponentPage = (ctx, { host, expectText = null } = {}, done) => 
       commitLocalAfterPut()
     }
 
-    // Prefer origin.put: real completion callback (pageHandler.put is fire-and-forget).
+    // Prefer origin.put (completion callback). Fall back to pageHandler.put when needed.
     if (typeof wiki?.origin?.put === 'function') {
       wiki.origin.put(slug, { ...action, forkPage }, afterPut)
       return
     }
-    // Legacy: preload then pageHandler.put; poll until apply appends the fork.
     raw.title = forkPage.title
     raw.story = JSON.parse(JSON.stringify(forkPage.story))
     raw.journal = JSON.parse(JSON.stringify(forkPage.journal))
@@ -3340,10 +3384,10 @@ const wikiSiteAdapter = () => createBrowserWikiSiteClient(wiki)
 // twin lives). Engine / open / same-wiki seats are skipped (null state).
 const discoverRatings = async (ctx, data, fetchGen) => {
   const slug = getPageSlug(ctx.$item) ?? ctx.chessObj?.wikiPageName
-  const whiteSite = String(data?.white?.site ?? data?.white?.host ?? '')
+  const whiteSite = String(data?.white?.site ?? '')
     .trim()
     .toLowerCase()
-  const blackSite = String(data?.black?.site ?? data?.black?.host ?? '')
+  const blackSite = String(data?.black?.site ?? '')
     .trim()
     .toLowerCase()
   if (!whiteSite && !blackSite) return
@@ -3416,38 +3460,52 @@ const neighborhoodSites = () => {
 }
 
 // Federation crawl seeds for open challenges: local + opponents + neighbourhood +
-// cached federation sites only — never wait on the global index (refreshed in background).
+// local-farm peers + cached federation sites — never wait on the global index
+// (refreshed in background).
 const resolveSurveyFetchSeeds = (localSite, _ctx, done, seedOpts = {}) => {
   const neighborhood = neighborhoodSites()
-  const opts = {
-    neighborhoodSites: neighborhood,
-    knownOpponents: Array.isArray(seedOpts.knownOpponents) ? seedOpts.knownOpponents : undefined,
-    knownFederationSites: seedOpts.knownFederationSites,
-    deferIndex: seedOpts.deferIndex !== false,
-  }
-  if (typeof wiki?.site !== 'function') {
-    done(
-      buildFetchTargets({
-        localSite,
-        neighborhoodSites: neighborhood,
-        knownOpponents: opts.knownOpponents || [],
-        indexSites: normalizeFederationSitesHosts(seedOpts.knownFederationSites),
-      }),
-    )
-    return
-  }
-  resolveFetchSeeds(wikiSiteAdapter(), localSite, opts)
-    .then(seeds => done(seeds))
-    .catch(() =>
+  const finish = (farmPeerSites = []) => {
+    const opts = {
+      neighborhoodSites: neighborhood,
+      farmPeerSites,
+      knownOpponents: Array.isArray(seedOpts.knownOpponents) ? seedOpts.knownOpponents : undefined,
+      knownFederationSites: seedOpts.knownFederationSites,
+      deferIndex: seedOpts.deferIndex !== false,
+    }
+    if (typeof wiki?.site !== 'function') {
       done(
         buildFetchTargets({
           localSite,
           neighborhoodSites: neighborhood,
+          farmPeerSites,
           knownOpponents: opts.knownOpponents || [],
           indexSites: normalizeFederationSitesHosts(seedOpts.knownFederationSites),
         }),
-      ),
-    )
+      )
+      return
+    }
+    resolveFetchSeeds(wikiSiteAdapter(), localSite, opts)
+      .then(seeds => done(seeds))
+      .catch(() =>
+        done(
+          buildFetchTargets({
+            localSite,
+            neighborhoodSites: neighborhood,
+            farmPeerSites,
+            knownOpponents: opts.knownOpponents || [],
+            indexSites: normalizeFederationSitesHosts(seedOpts.knownFederationSites),
+          }),
+        ),
+      )
+  }
+  const preset = Array.isArray(seedOpts.farmPeerSites) ? seedOpts.farmPeerSites : null
+  if (preset) {
+    finish(preset)
+    return
+  }
+  void fetchFarmPeerSites({ localSite })
+    .then(peers => finish(peers))
+    .catch(() => finish([]))
 }
 
 function normalizeFederationSitesHosts(raw) {
@@ -3578,6 +3636,14 @@ const showChallengeJoinGhost = ({ host, itemId, anchor, challenge, pgn, joinerDi
     .trim()
     .toLowerCase()
   const isAuthenticatedOwner = viewerIsAuthenticatedOwner()
+  if (
+    !challengeJoinGate(challengeState, {
+      isAuthenticatedOwner,
+      viewingSite: localSite,
+    }).ok
+  ) {
+    return
+  }
   const joinerName = resolveJoinerNameForGhost(joinerDisplayName, localSite)
   const joinerId = isAuthenticatedOwner ? formatPlayerId(joinerName, localSite) : guestSeatName(joinerName)
   const seatedPgn = buildChallengeJoinGhostPgn(ghostPgn, challengeState, joinerId)
@@ -3695,6 +3761,12 @@ const presentMetaGhostPage = ({ meta, anchor, ctx, openChallengeSetupPending = f
   const localSite = String(ctx.chessObj?.wikiSite || location.host || '')
     .trim()
     .toLowerCase()
+  const lineupSlugs = collectLineupPageSlugs(localSite)
+  // Open the lineup column immediately. Waiting on system/sitemap.json (cold mobile /
+  // wiki PWA) delayed the whole page; origin uniqueness is rechecked at first create
+  // via ensureUniqueCreateActionSlug, and we still refine the ghost title in the background.
+  let presentedTitle = proposeUniquePageTitle(meta.title, lineupSlugs)
+  let $presented = null
 
   const presentGhost = ghostTitle => {
     const previewTs = Date.now()
@@ -3706,6 +3778,8 @@ const presentMetaGhostPage = ({ meta, anchor, ctx, openChallengeSetupPending = f
     try {
       wiki.showResult(ghost, anchor ? { $page: anchor } : {})
       const $ghost = typeof $ !== 'undefined' ? $('.page').last() : null
+      $presented = $ghost?.length ? $ghost : null
+      presentedTitle = ghostTitle
       if ($ghost?.length) {
         window.setTimeout(() => {
           resyncChessItemsOnPage($ghost)
@@ -3726,19 +3800,25 @@ const presentMetaGhostPage = ({ meta, anchor, ctx, openChallengeSetupPending = f
     return sitemap?.length ? sitemap.map(e => e?.slug).filter(Boolean) : []
   }
 
-  if (typeof wiki?.site === 'function' && localSite) {
-    try {
-      const lineupSlugs = collectLineupPageSlugs(localSite)
-      wiki.site(localSite).get('system/sitemap.json', (err, res) => {
-        const slugs = !err ? slugsFromSitemap(res) : []
-        presentGhost(proposeUniquePageTitle(meta.title, [...slugs, ...lineupSlugs]))
-      })
-      return
-    } catch {
-      /* fall through */
-    }
+  presentGhost(presentedTitle)
+
+  if (typeof wiki?.site !== 'function' || !localSite) return
+  try {
+    wiki.site(localSite).get('system/sitemap.json', (err, res) => {
+      const slugs = !err ? slugsFromSitemap(res) : []
+      const unique = proposeUniquePageTitle(meta.title, [...slugs, ...lineupSlugs])
+      if (!unique || unique === presentedTitle) return
+      if (!$presented?.length || !$presented.hasClass('ghost')) return
+      const current = String($presented.data('data')?.title || $presented.find('h1 .title').first().text() || '')
+        .trim()
+        .replaceAll(/\s+/g, ' ')
+      if (current && current !== presentedTitle) return
+      applyGhostPageTitle($presented, unique, { ctx })
+      presentedTitle = unique
+    })
+  } catch {
+    /* sitemap refine is best-effort */
   }
-  presentGhost(proposeUniquePageTitle(meta.title, collectLineupPageSlugs(localSite)))
 }
 
 const putChessPageCharmPatch = (slug, patch, done) => {
@@ -3780,7 +3860,7 @@ const publishSurveyGameIndexUpsert = ({ slug, itemId, title, pgn } = {}, done) =
     return
   }
   const built = buildGameIndexEntryFromPgn({
-    host: localSite,
+    site: localSite,
     slug: pageSlug,
     itemId: id,
     title,
@@ -3878,7 +3958,67 @@ const ensureSurveyPageObject = existing => {
   return { page, isNew: true }
 }
 
-// Persist a pending open challenge on My Chess Games (`openChallenges` metadata).
+// Find My Chess Games (or any slug) already open in the lineup for a journal put.
+// Skips ghosts and remote forks — those are not origin-writable survey pages.
+const findOpenLineupPageForJournalPut = slug => {
+  if (typeof $ !== 'function') return null
+  const want = String(slug || '').trim()
+  if (!want) return null
+  const localHost = String(location.host || '').trim()
+  for (const el of $('.page').toArray()) {
+    const $page = $(el)
+    const pageSlug = String($page.attr('id') || '').split('_rev')[0]
+    if (pageSlug !== want) continue
+    if ($page.hasClass('ghost')) continue
+    const site = $page.data('site')
+    if (
+      site &&
+      site !== 'origin' &&
+      site !== 'view' &&
+      site !== localHost &&
+      site !== 'local' &&
+      !isBrowserLocalForkPageSite(site, { isLocalClass: $page.hasClass('local') })
+    ) {
+      continue
+    }
+    return $page
+  }
+  return null
+}
+
+// After wiki.origin.put (no $page), mirror pageHandler's success path so an open
+// lineup column gets pageObject.apply + a journal glyph without a full refresh.
+const syncOpenLineupJournalAfterOriginPut = (slug, action) => {
+  if (!action) return
+  const $page = findOpenLineupPageForJournalPut(slug)
+  if (!$page?.length || journalHasAppliedAction($page, action)) return
+  const pageObject = typeof wiki?.lineup?.atKey === 'function' ? wiki.lineup.atKey($page.data('key')) : null
+  try {
+    if (typeof pageObject?.apply === 'function') {
+      pageObject.apply(action)
+    } else {
+      const raw = pageObject?.getRawPage?.() || $page.data('data')
+      if (raw) {
+        applyPageAction(raw, action)
+        $page.data('data', raw)
+      }
+    }
+  } catch {
+    /* lineup apply is best-effort */
+  }
+  const pageSlug = String($page.attr('id') || '').split('_rev')[0] || slug
+  const $journal = $page.find('.journal')
+  if ($journal.length) appendJournalActionDom($journal, action, pageSlug)
+  try {
+    wiki.neighborhoodObject?.updateSitemap?.(pageObject)
+    wiki.neighborhoodObject?.updateIndex?.(pageObject)
+  } catch {
+    /* neighborhood helpers are best-effort outside the wiki shell */
+  }
+}
+
+// Persist a pending open challenge on My Chess Games (`page.chess.openChallenges`).
+// Journal-free page charm — seeks can come and go without bloating or forking away.
 // No game page is created until an opponent accepts — titles need both seats filled.
 const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, done) => {
   const localSite = String(location.host || '')
@@ -3894,7 +4034,7 @@ const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, do
       done?.(null)
       return
     }
-    const result = syncOpenChallengeSurveyOnPage(page, { add, removeIds, host: localSite })
+    const result = syncOpenChallengeSurveyOnPage(page, { add, removeIds, site: localSite })
     if (result.error === 'no-survey-item') {
       done?.(new Error('no-survey-item'))
       return
@@ -3908,32 +4048,35 @@ const publishOpenChallengeSurveyDelta = ({ add = null, removeIds = [] } = {}, do
         done?.(err)
         return
       }
-      const index = readGameIndex(page)
-      if (!(index.active.length || index.completed.length || index.challenges.length)) {
+      const charm = page?.chess && typeof page.chess === 'object' ? page.chess : null
+      if (!charm) {
         done?.(null)
         return
       }
-      putChessPageCharmPatch(SURVEY_PAGE_SLUG, { gameIndex: index }, done)
+      const patch = {}
+      if (charm.openChallenges !== undefined) patch.openChallenges = charm.openChallenges
+      // Only push gameIndex when sync intentionally rewrote a readable catalog.
+      if (result.gameIndexTouched && charm.gameIndex !== undefined) patch.gameIndex = charm.gameIndex
+      if (!Object.keys(patch).length) {
+        done?.(null)
+        return
+      }
+      putChessPageCharmPatch(SURVEY_PAGE_SLUG, patch, done)
     }
     if (isNew) {
-      wiki.origin.put(
-        SURVEY_PAGE_SLUG,
-        {
-          type: 'create',
-          item: { title: page.title || SURVEY_PAGE_TITLE, story: page.story },
-          date: Date.now(),
-        },
-        persistCharm,
-      )
+      const createAction = {
+        type: 'create',
+        item: { title: page.title || SURVEY_PAGE_TITLE, story: page.story },
+        date: Date.now(),
+      }
+      wiki.origin.put(SURVEY_PAGE_SLUG, createAction, err => {
+        if (!err) syncOpenLineupJournalAfterOriginPut(SURVEY_PAGE_SLUG, createAction)
+        persistCharm(err)
+      })
       return
     }
-    const action = page.journal?.[page.journal.length - 1]
-    if (!action || action.type !== 'edit') {
-      // Journal unchanged but charm may have been updated (challenge refs).
-      persistCharm(null)
-      return
-    }
-    wiki.origin.put(SURVEY_PAGE_SLUG, { ...action, date: Date.now() }, persistCharm)
+    // Seeks live only in page.chess — never journal the SURVEY item for post/cancel.
+    persistCharm(null)
   }
 
   wiki.site(localSite).get(`${SURVEY_PAGE_SLUG}.json`, (err, existing) => {
@@ -4120,6 +4263,9 @@ const buildLeaderboardData = (ctx, data, fetchGen, requestSource = null) => {
         if (result.meta?.rebuiltGameIndex) {
           persistRebuiltSurveyGameIndex(localSite, result.meta.rebuiltGameIndex)
         }
+        if (result.meta?.persistOpenChallenges) {
+          persistSurveyOpenChallenges(localSite, result.meta.persistOpenChallenges)
+        }
         return
       }
       const extraNeighborhoodSites = Array.isArray(data?.extraNeighborhoodSites)
@@ -4191,6 +4337,7 @@ const buildSiteSurveyDeferredChallenges = (ctx, data, requestSource = null) => {
     return
   }
   const site = wikiSiteAdapter()
+  const farmPeerSites = Array.isArray(data?.farmPeerSites) ? data.farmPeerSites : undefined
   resolveSurveyFetchSeeds(
     localSite,
     ctx,
@@ -4201,6 +4348,7 @@ const buildSiteSurveyDeferredChallenges = (ctx, data, requestSource = null) => {
             localOpenChallenges,
             seeds,
             slug,
+            farmPeerSites,
             blockList: data?.blockList,
             knownOpponents: data?.knownOpponents,
             knownFederationSites: data?.knownFederationSites,
@@ -4541,7 +4689,9 @@ const shellAppMessageHandlers = {
     const ghostItemId = String(event.data.ghostItemId || ghost?.itemId || '').trim()
     const pageBackedSlug = String(ghost?.slug || '').trim()
     if (ownerCanJournalHereFlag(ctx)) {
-      if (ghost && challenge) {
+      // Open seeks are listed on My Chess Games. Accept / seat-fill sends an active
+      // challenge (or null on cancel) — retire the survey row either way.
+      if (ghost && challenge && isOpenChallenge(challenge)) {
         publishOpenChallengeSurveyDelta({
           add: {
             itemId: ghost.itemId,
@@ -4552,13 +4702,13 @@ const shellAppMessageHandlers = {
           },
         })
         if (challenge.challengeTarget) registerDirectedChallengeNeighbor(challenge.challengeTarget)
-      } else if (!challenge && ghostItemId) {
+      } else if (ghostItemId && (!challenge || !isOpenChallenge(challenge))) {
         publishOpenChallengeSurveyDelta({ removeIds: [ghostItemId] })
       }
     }
     if (event.data.challenge !== undefined) {
       if (shouldBlockShellJournalSave(ctx, event)) return
-      // Pending survey-only seeks: do not journal challenge onto the posting item.
+      // Pending survey-only seeks: live on page.chess.openChallenges, not the posting item.
       // Page-backed seeks keep challenge on the game item for fork / Accept.
       if (ghost && !pageBackedSlug) {
         delete ctx.chessObj.challenge
@@ -4826,11 +4976,11 @@ const shellAppMessageHandlers = {
     }
   },
   [MSG.REMOTE_WATCH](ctx, event, text, fen) {
-    startRemoteWatch(ctx, event.data.host || null)
+    startRemoteWatch(ctx, event.data.site || null)
   },
   [MSG.FORK_REMOTE_PAGE](ctx, event, text, fen) {
     forkRemoteOpponentPage(ctx, {
-      host: event.data?.host || null,
+      site: event.data?.site || null,
       expectText: event.data?.expectText || text || null,
     })
   },
@@ -4860,7 +5010,7 @@ const shellAppMessageHandlers = {
     }
   },
   [MSG.LOOKUP_SITE_DISPLAY](ctx, event, text, fen) {
-    const host = String(event.data?.site ?? event.data?.host ?? '').trim()
+    const host = String(event.data?.site ?? '').trim()
     const requestId = event.data?.requestId
     void (async () => {
       let displayName = ''
@@ -4937,8 +5087,9 @@ const shellAppMessageHandlers = {
     })
   },
   [MSG.ALERT_UI](ctx, event, text, fen) {
-    // Full-viewport alert on the parent wiki window — visible even when the chess
-    // iframe is scrolled away or showing another plugin mode.
+    // Item-scoped overlay on the parent wiki window — same mount as paste confirm so
+    // shell CSS applies (backdrop + panel). document.body left the dialog unstyled and
+    // left the "double-click here to edit" item bar visible underneath.
     const title = String(event.data?.title || 'Chess').trim() || 'Chess'
     const message = String(event.data?.message || '').trim()
     const okLabel = String(event.data?.okLabel || 'OK').trim() || 'OK'
@@ -4947,7 +5098,19 @@ const shellAppMessageHandlers = {
     } catch {
       /* ignore */
     }
-    openAlertModal({ title, message, okLabel, mount: document.body })
+    const mount = shellPasteModalMount(ctx)
+    try {
+      mount?.scrollIntoView?.({ block: 'nearest' })
+    } catch {
+      /* ignore */
+    }
+    openAlertModal({
+      title,
+      message,
+      okLabel,
+      mount: mount || document.body,
+      embedded: Boolean(mount),
+    })
   },
   [MSG.OPEN_SURVEY_PAGE](ctx, event, text, fen) {
     // Present the "My Chess Games" page as a forkable GHOST in the lineup, right after
@@ -5054,7 +5217,7 @@ const shellAppMessageHandlers = {
   },
   [MSG.OPEN_GAME_PAGE](ctx, event, text, fen) {
     const gameSlug = String(event.data?.slug || '').trim()
-    const host = String(event.data?.site ?? event.data?.host ?? '')
+    const host = String(event.data?.site ?? '')
       .trim()
       .toLowerCase()
     const itemId = String(event.data?.itemId || '').trim()
@@ -5099,7 +5262,7 @@ const shellAppMessageHandlers = {
       if (lines) story.push({ type: 'paragraph', id: newItemId(), text: lines })
     }
     for (const row of shown) {
-      const site = String(row?.site ?? row?.host ?? '')
+      const site = String(row?.site ?? '')
         .trim()
         .toLowerCase()
       const slug = String(row?.slug || '').trim()

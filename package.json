@@ -31,7 +31,7 @@
     "@fortawesome/fontawesome-free": "^6.7.2",
     "bootstrap": "^5.3.5",
     "bootstrap-auto-dark-mode": "^1.1.0",
-    "chess-console": "^6.13.3",
+    "chess-console": "^6.14.0",
     "chess-console-stockfish": "^6.4.1",
     "cm-chessboard-position-editor": "^2.2.3",
     "cm-engine-runner": "^2.0.1",

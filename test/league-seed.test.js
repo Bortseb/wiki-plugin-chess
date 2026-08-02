@@ -20,7 +20,11 @@ import {
   SEED_MIN_PLAYERS,
   SEED_MAX_PLAYERS,
 } from '../scripts/league/index.js'
-import { parsePgnParts, rebuildStoryFromJournal } from '../src/chess-core.js'
+import {
+  CHESS_COMPLETE_SYMBOL,
+  parsePgnParts,
+  rebuildStoryFromJournal,
+} from '../src/chess-core.js'
 import { readChessPageCharm } from '../src/federation.js'
 
 function revisionStory(journal, revIndex) {
@@ -197,9 +201,12 @@ describe('devtools · league-seed', () => {
         sans: ['d4', 'Nf6'],
       })
       const opponentGlyph = page.journal.find(action => action.type === 'edit' && action.symbol === '♙')
-      const ownGlyph = page.journal.find(action => action.type === 'edit' && action.symbol === '♞')
+      // Final ply stamps Result, so the completing save uses 🏁 (not the piece glyph).
+      const completeGlyph = page.journal.find(
+        action => action.type === 'edit' && action.symbol === CHESS_COMPLETE_SYMBOL,
+      )
       assert.ok(opponentGlyph, 'fork merge should journal the opponent pawn (d4)')
-      assert.ok(ownGlyph, 'seat should journal its own knight reply (Nf6)')
+      assert.ok(completeGlyph, 'seat should journal checkered flag when the game completes on Nf6')
     })
 
     it('records opponent move glyphs on the white seat too', () => {
@@ -211,10 +218,12 @@ describe('devtools · league-seed', () => {
       })
       const ownOpen = page.journal.find(action => action.type === 'edit' && action.symbol === '♙')
       const opponentReply = page.journal.find(action => action.type === 'edit' && action.symbol === '♟')
-      const ownReply = page.journal.find(action => action.type === 'edit' && action.symbol === '♘')
+      const completeGlyph = page.journal.find(
+        action => action.type === 'edit' && action.symbol === CHESS_COMPLETE_SYMBOL,
+      )
       assert.ok(ownOpen, 'white should journal e4')
       assert.ok(opponentReply, 'white should journal black e5 after fork merge')
-      assert.ok(ownReply, 'white should journal Nf3')
+      assert.ok(completeGlyph, 'white should journal checkered flag when Nf3 completes the game')
     })
 
     it('replays the first knight edit to the matching partial movetext', () => {
@@ -225,21 +234,24 @@ describe('devtools · league-seed', () => {
         opponentSite: 'frank.localhost:3001',
         sans,
       })
+      // Mid-game knight reply keeps its piece glyph; only the final completing ply is 🏁.
       const knightEditIndex = page.journal.findIndex(action => action.type === 'edit' && action.symbol === '♞')
       assert.ok(knightEditIndex >= 0, 'black Nf6 edit should carry a knight glyph')
       const pgn = revisionStory(page.journal, knightEditIndex)
       assert.match(pgn, /1\.\s*d4\s+Nf6/)
     })
 
-    it('stores FEN snapshots on move edits', () => {
+    it('stores FEN snapshots on the completing journal edit', () => {
       const page = buildCorrespondenceGamePage({
         ...base,
         side: 'white',
         sans: ['e4'],
       })
-      const moveEdit = page.journal.find(action => action.type === 'edit' && action.symbol === '♙')
-      assert.ok(moveEdit?.fen, 'move edit should record board FEN')
-      assert.ok(moveEdit?.fenKey, 'move edit should record a transposition key')
+      const completeEdit = page.journal.find(
+        action => action.type === 'edit' && action.symbol === CHESS_COMPLETE_SYMBOL,
+      )
+      assert.ok(completeEdit?.fen, 'completing edit should record board FEN')
+      assert.ok(completeEdit?.fenKey, 'completing edit should record a transposition key')
     })
 
     it('keeps one chess item id in story edits and the Site tag', () => {
@@ -350,7 +362,7 @@ describe('devtools · league-seed', () => {
       )
       assert.equal(surveyPage.chess?.gameIndex?.completed?.length, 2)
       assert.equal(surveyPage.chess.gameIndex.completed[0].slug, 'game-a')
-      assert.equal(surveyPage.chess.gameIndex.completed[0].host, 'frank.localhost:3001')
+      assert.equal(surveyPage.chess.gameIndex.completed[0].site, 'frank.localhost:3001')
       assert.equal(
         surveyPage.journal.some(entry => entry.type === 'chess-charm'),
         false,

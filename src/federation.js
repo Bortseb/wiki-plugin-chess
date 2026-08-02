@@ -30,7 +30,6 @@ import {
   isOpenSeatTag,
   getPgnTag,
   setPgnTag,
-  clearPgnTag,
   normalizeWikiSiteInput,
   isSurveyItemText,
   playerDisplayLabel,
@@ -631,7 +630,28 @@ function emptyChessPageCharm() {
     version: CHESS_PAGE_CHARM_VERSION,
     federation: { checkpoint: null, trustedPeers: [] },
     gameIndex: emptyGameIndex(),
+    openChallenges: [],
   }
+}
+
+// Pending seeks on My Chess Games — full records (PGN + challenge) in page.chess.
+// openChallengeSurveyRecord is declared later in this module (function hoisting).
+function normalizeSurveyOpenChallengeRecords(list) {
+  const out = []
+  const seen = new Set()
+  for (const raw of Array.isArray(list) ? list : []) {
+    const record = openChallengeSurveyRecord(raw?.challenge, {
+      itemId: raw?.itemId,
+      pgn: raw?.pgn,
+      title: raw?.title,
+      slug: raw?.slug,
+    })
+    if (!record) continue
+    if (seen.has(record.itemId)) continue
+    seen.add(record.itemId)
+    out.push(record)
+  }
+  return out
 }
 
 // # Survey gameIndex (My Chess Games catalog — metadata only, no PGNs)
@@ -643,20 +663,20 @@ export function emptyGameIndex() {
 }
 
 export function gameIndexEntryKey(entry) {
-  const host = cleanSite(entry?.host)
+  const site = cleanSite(entry?.site)
   const slug = String(entry?.slug || '').trim()
   const itemId = String(entry?.itemId || '').trim()
-  if (!host || !slug) return ''
-  return `${host}|${slug}|${itemId}`
+  if (!site || !slug) return ''
+  return `${site}|${slug}|${itemId}`
 }
 
 export function normalizeGameIndexEntry(raw) {
   if (!raw || typeof raw !== 'object') return null
-  const host = cleanSite(raw.host)
+  const site = cleanSite(raw.site)
   const slug = String(raw.slug || '').trim()
   const itemId = String(raw.itemId || '').trim()
-  if (!host || !slug) return null
-  const out = { host, slug, itemId }
+  if (!site || !slug) return null
+  const out = { site, slug, itemId }
   const title = String(raw.title || '').trim()
   if (title) out.title = title
   const gameHash = String(raw.gameHash || '').trim().toLowerCase()
@@ -675,6 +695,44 @@ export function normalizeGameIndexEntry(raw) {
   const ts = Number(raw.ts)
   if (Number.isFinite(ts) && ts > 0) out.ts = ts
   return out
+}
+
+// True when any catalog row is present but fails `site`-keyed normalize (unreadable
+// rows are dropped from fetch slugs — rebuild from the sitemap instead).
+export function gameIndexHasUnreadableEntries(raw) {
+  if (!raw || typeof raw !== 'object') return false
+  for (const name of ['active', 'completed', 'challenges']) {
+    for (const row of Array.isArray(raw[name]) ? raw[name] : []) {
+      if (!row || typeof row !== 'object') continue
+      if (!normalizeGameIndexEntry(row)) return true
+    }
+  }
+  return false
+}
+
+// Drop survey seeks whose page-backed game already has both seats filled (accept
+// left a stale openChallenges row behind).
+export function filterOpenChallengesStillSeeking(challenges, pageGames) {
+  const filledItemIds = new Set()
+  const filledSlugs = new Set()
+  for (const row of Array.isArray(pageGames) ? pageGames : []) {
+    const pgn = typeof row?.pgn === 'string' ? row.pgn : ''
+    if (!pgn || !bothSeatsFilled(pgn)) continue
+    const itemId = String(row?.itemId || '').trim()
+    const slug = String(row?.slug || '').trim()
+    if (itemId) filledItemIds.add(itemId)
+    if (slug) filledSlugs.add(slug)
+  }
+  if (!filledItemIds.size && !filledSlugs.size) {
+    return Array.isArray(challenges) ? challenges : []
+  }
+  return (Array.isArray(challenges) ? challenges : []).filter(entry => {
+    const itemId = String(entry?.itemId || '').trim()
+    const slug = String(entry?.slug || '').trim()
+    if (itemId && filledItemIds.has(itemId)) return false
+    if (slug && filledSlugs.has(slug)) return false
+    return true
+  })
 }
 
 function normalizeGameIndexBucket(list) {
@@ -746,7 +804,7 @@ export function gameIndexFetchSlugs(index) {
 }
 
 // Classify a PGN into an index bucket. Open-seat seeks are not catalogued here —
-// they live in SURVEY `openChallenges` (and optionally `gameIndex.challenges` refs).
+// they live in `page.chess.openChallenges` (and `gameIndex.challenges` refs).
 export function classifyGameIndexBucket(pgn) {
   if (typeof pgn !== 'string' || !pgn.trim()) return null
   try {
@@ -761,11 +819,11 @@ export function classifyGameIndexBucket(pgn) {
   }
 }
 
-export function buildGameIndexEntryFromPgn({ host, slug, itemId, title = '', pgn } = {}) {
-  const pageHost = cleanSite(host)
+export function buildGameIndexEntryFromPgn({ site, slug, itemId, title = '', pgn } = {}) {
+  const pageSite = cleanSite(site)
   const pageSlug = String(slug || '').trim()
   const id = String(itemId || '').trim()
-  if (!pageHost || !pageSlug || typeof pgn !== 'string' || !pgn.trim()) return null
+  if (!pageSite || !pageSlug || typeof pgn !== 'string' || !pgn.trim()) return null
   const bucket = classifyGameIndexBucket(pgn)
   if (!bucket) return null
   try {
@@ -773,14 +831,14 @@ export function buildGameIndexEntryFromPgn({ host, slug, itemId, title = '', pgn
     const whiteSite = cleanSite(parsePlayerId(tagFor('White'))?.domain)
     const blackSite = cleanSite(parsePlayerId(tagFor('Black'))?.domain)
     let opponentSite = ''
-    if (whiteSite && !sitesMatch(whiteSite, pageHost)) opponentSite = whiteSite
-    else if (blackSite && !sitesMatch(blackSite, pageHost)) opponentSite = blackSite
+    if (whiteSite && !sitesMatch(whiteSite, pageSite)) opponentSite = whiteSite
+    else if (blackSite && !sitesMatch(blackSite, pageSite)) opponentSite = blackSite
     const ratedTag = tagFor('Rated')
     const rated = ratedTag ? isRatedTagValue(ratedTag) : true
     const result = String(tagFor('Result') || '').trim()
     const timeline = bucket === 'completed' ? readGameTimelineKey(pgn) : null
     const entry = normalizeGameIndexEntry({
-      host: pageHost,
+      site: pageSite,
       slug: pageSlug,
       itemId: id,
       title: String(title || '').trim(),
@@ -800,13 +858,13 @@ export function buildGameIndexEntryFromPgn({ host, slug, itemId, title = '', pgn
   }
 }
 
-export function buildGameIndexFromPageGames(pageGames, host, { challenges = [], now = Date.now() } = {}) {
-  const pageHost = cleanSite(host)
+export function buildGameIndexFromPageGames(pageGames, site, { challenges = [], now = Date.now() } = {}) {
+  const pageSite = cleanSite(site)
   const active = []
   const completed = []
   for (const row of Array.isArray(pageGames) ? pageGames : []) {
     const built = buildGameIndexEntryFromPgn({
-      host: cleanSite(row?.host) || pageHost,
+      site: cleanSite(row?.site) || pageSite,
       slug: row?.slug,
       itemId: row?.itemId,
       title: row?.title,
@@ -819,7 +877,7 @@ export function buildGameIndexFromPageGames(pageGames, host, { challenges = [], 
   const challengeRows = []
   for (const row of Array.isArray(challenges) ? challenges : []) {
     const entry = normalizeGameIndexEntry({
-      host: cleanSite(row?.site ?? row?.host) || pageHost,
+      site: cleanSite(row?.site) || pageSite,
       slug: row?.slug || SURVEY_PAGE_SLUG,
       itemId: row?.itemId,
       title: row?.title,
@@ -861,16 +919,16 @@ export function applyGameIndexToSurveyPage(page, gameIndex) {
 }
 
 // League seed / rebuild: write completed (and optional active) refs onto My Chess Games.
-export function applyCompletedGameIndexToSurveyPage(surveyPage, host, gamePages) {
+export function applyCompletedGameIndexToSurveyPage(surveyPage, site, gamePages) {
   if (!surveyPage) return false
-  const pageHost = cleanSite(host)
+  const pageSite = cleanSite(site)
   const rows = Array.isArray(gamePages) ? gamePages : []
   const completed = []
   const active = []
   for (const row of rows) {
     if (row?.pgn) {
       const built = buildGameIndexEntryFromPgn({
-        host: pageHost,
+        site: pageSite,
         slug: row.slug,
         itemId: row.itemId,
         title: row.title,
@@ -882,7 +940,7 @@ export function applyCompletedGameIndexToSurveyPage(surveyPage, host, gamePages)
       continue
     }
     const entry = normalizeGameIndexEntry({
-      host: pageHost,
+      site: pageSite,
       slug: row?.slug,
       itemId: row?.itemId,
       title: row?.title,
@@ -927,11 +985,16 @@ function sanitizeChessPageCharm(meta) {
   const base = mergeChessPageCharm(emptyChessPageCharm(), meta)
   base.federation = normalizeFederationGossip(base.federation)
   base.gameIndex = normalizeGameIndex(base.gameIndex)
+  base.openChallenges = normalizeSurveyOpenChallengeRecords(base.openChallenges)
   return base
 }
 
 function federationGossipFingerprint(federation) {
   return JSON.stringify(normalizeFederationGossip(federation))
+}
+
+function openChallengesFingerprint(list) {
+  return JSON.stringify(normalizeSurveyOpenChallengeRecords(list))
 }
 
 // Normalize chess-charm patches before page persistence.
@@ -950,6 +1013,9 @@ export function normalizeChessCharmPatch(patch) {
   if (patch.gameIndex !== undefined) {
     out.gameIndex = normalizeGameIndex(patch.gameIndex)
   }
+  if (patch.openChallenges !== undefined) {
+    out.openChallenges = normalizeSurveyOpenChallengeRecords(patch.openChallenges)
+  }
   return out
 }
 
@@ -962,6 +1028,7 @@ export function mergeChessPageCharm(base, patch) {
     version: CHESS_PAGE_CHARM_VERSION,
     federation: prev.federation,
     gameIndex: prev.gameIndex,
+    openChallenges: Array.isArray(prev.openChallenges) ? prev.openChallenges : [],
   }
   if (next.federation !== undefined) {
     const pf = prev.federation && typeof prev.federation === 'object' ? prev.federation : {}
@@ -976,6 +1043,9 @@ export function mergeChessPageCharm(base, patch) {
   }
   if (next.gameIndex !== undefined) {
     out.gameIndex = normalizeGameIndex(next.gameIndex)
+  }
+  if (next.openChallenges !== undefined) {
+    out.openChallenges = normalizeSurveyOpenChallengeRecords(next.openChallenges)
   }
   return out
 }
@@ -1034,14 +1104,18 @@ export function shouldPublishFederationGossip(
   return federationGossipFingerprint(prev) !== federationGossipFingerprint(next)
 }
 
-// True when a chess-charm patch would change persisted federation gossip or gameIndex.
+// True when a chess-charm patch would change persisted federation gossip, gameIndex, or openChallenges.
 export function chessCharmPatchWouldChange(page, patch) {
   const normalized = normalizeChessCharmPatch(patch)
   if (!Object.keys(normalized).length) return false
   const prev = readChessPageCharm(page)
   const next = sanitizeChessPageCharm(mergeChessPageCharm(prev, normalized))
   if (federationGossipFingerprint(prev.federation) !== federationGossipFingerprint(next.federation)) return true
-  return gameIndexFingerprint(prev.gameIndex) !== gameIndexFingerprint(next.gameIndex)
+  if (gameIndexFingerprint(prev.gameIndex) !== gameIndexFingerprint(next.gameIndex)) return true
+  if (openChallengesFingerprint(prev.openChallenges) !== openChallengesFingerprint(next.openChallenges)) return true
+  // First write of openChallenges onto page.chess migrates / hides SURVEY-item seeks.
+  if (normalized.openChallenges !== undefined && !Array.isArray(page?.chess?.openChallenges)) return true
+  return false
 }
 
 // Persist chess maintenance data in `page.chess` only (no duplicate journal entries).
@@ -1052,8 +1126,20 @@ export function reviseChessCharmOnPage(page, patch) {
   // chess-charm journal noise). Never rebuild story here — that wiped journal-less
   // plugin default pages and is not a normal plugin's job.
   const normalized = normalizeChessCharmPatch(patch)
+  const rawGameIndex = page?.chess?.gameIndex
   const prev = readChessPageCharm(page)
-  page.chess = sanitizeChessPageCharm(mergeChessPageCharm(prev, normalized))
+  const hadOpenChallenges = Array.isArray(page?.chess?.openChallenges)
+  const patchSetsOpenChallenges = normalized.openChallenges !== undefined
+  const next = sanitizeChessPageCharm(mergeChessPageCharm(prev, normalized))
+  // Do not invent openChallenges on unrelated charm writes — that would hide legacy
+  // SURVEY-item seeks that have not been migrated yet.
+  if (!hadOpenChallenges && !patchSetsOpenChallenges) delete next.openChallenges
+  // Keep unreadable catalog rows on disk until a full gameIndex write / sitemap rebuild
+  // replaces them with canonical `site` keys (sanitize would otherwise wipe them).
+  if (normalized.gameIndex === undefined && gameIndexHasUnreadableEntries(rawGameIndex)) {
+    next.gameIndex = rawGameIndex
+  }
+  page.chess = next
   stripChessCharmJournal(page)
   return true
 }
@@ -1201,7 +1287,8 @@ export const LEADERBOARD_INTRO_ID = 'a1b2c3d4e5f67890'
 export const LEADERBOARD_CHESS_ID = 'b2c3d4e5f6789012'
 
 // Keep in sync with pages/chess-leaderboards (see test/federation.test.js).
-export const LEADERBOARD_INTRO_TEXT = 'Rated chess game leaderboards.'
+export const LEADERBOARD_INTRO_TEXT =
+  'Rated chess game leaderboards. For more details read [[About Chess Plugin]].'
 
 export function computeStateHash(players) {
   const hosts = Object.keys(players || {}).sort()
@@ -1217,7 +1304,7 @@ export function checkpointSupermajority(peerCheckpoints, trustedPeers, threshold
   if (!peers.length) return null
   const tallies = new Map()
   for (const row of Array.isArray(peerCheckpoints) ? peerCheckpoints : []) {
-    const host = cleanSite(row?.site ?? row?.host)
+    const host = cleanSite(row?.site)
     const hash = String(row?.checkpoint?.state_hash || '').trim()
     if (!host || !hash || !peers.includes(host)) continue
     tallies.set(hash, (tallies.get(hash) || 0) + 1)
@@ -1272,9 +1359,9 @@ export function filterOpenChallengesByBlockList(entries, blockList) {
   if (!blocked.size) return Array.isArray(entries) ? entries : []
   return (Array.isArray(entries) ? entries : []).filter(row => {
     if (!row) return false
-    const site = cleanSite(row.site ?? row.host)
+    const site = cleanSite(row.site)
     if (site && [...blocked].some(h => sitesMatch(h, site))) return false
-    const creator = cleanSite(row.challenge?.creator?.site ?? row.challenge?.creator?.host)
+    const creator = cleanSite(row.challenge?.creator?.site)
     if (creator && [...blocked].some(h => sitesMatch(h, creator))) return false
     const target = cleanSite(row.challenge?.challengeTarget)
     if (target && [...blocked].some(h => sitesMatch(h, target))) return false
@@ -1357,10 +1444,19 @@ export function buildFetchTargets(opts = {}) {
   const knownOpponents = opts.knownOpponents ?? []
   const rosterSites = opts.rosterSites ?? []
   const nearbySites = opts.neighborhoodSites ?? []
+  const farmPeerSites = opts.farmPeerSites ?? []
   const indexSites = opts.indexSites ?? []
   // Personal seeds first so progress UI / early waves surface people you already
-  // play before the global chess-plugin index.
-  return dedupeSites([ownSite, ...knownOpponents, ...rosterSites, ...nearbySites, ...indexSites])
+  // play before the global chess-plugin index. Local-farm sibling peers come after
+  // curated neighbourhood, before the federation-search cache/index.
+  return dedupeSites([
+    ownSite,
+    ...knownOpponents,
+    ...rosterSites,
+    ...nearbySites,
+    ...farmPeerSites,
+    ...indexSites,
+  ])
 }
 
 // Dedupe a list of hosts, preserving first-seen order. Blanks dropped. Each entry is
@@ -1675,6 +1771,7 @@ export const CHALLENGE_REJECT_ABOVE_MAX = 'rating-above-max'
 export const CHALLENGE_REJECT_UNKNOWN_RATING = 'rating-unknown'
 export const CHALLENGE_REJECT_NOT_OPEN = 'challenge-not-open'
 export const CHALLENGE_REJECT_OWNERS_ONLY = 'owners-only'
+export const CHALLENGE_REJECT_WRONG_SITE = 'wrong-site'
 
 function normalizeChallengeColor(value) {
   const color = String(value || '')
@@ -1695,7 +1792,7 @@ function normalizeChallengeParticipant(raw) {
   if (!id) return null
   return {
     id,
-    site: normalizeWikiSiteInput(raw.site ?? raw.host) || parsePlayerId(id)?.domain || '',
+    site: normalizeWikiSiteInput(raw.site) || parsePlayerId(id)?.domain || '',
     rating: Number.isFinite(raw.rating) ? Math.round(raw.rating) : null,
   }
 }
@@ -1711,14 +1808,12 @@ export function normalizeChallengeState(raw) {
   const maxRating = normalizeRatingBound(cfg.maxRating)
 
   const rated = Boolean(cfg.rated)
-  // Rated seeks are wiki-owners only. Casual defaults to allowing guests unless
-  // the creator sets AllowGuests=no (missing tag / undefined → allow).
-  const allowGuests = rated ? false : cfg.allowGuests !== false
+  // Blank ChallengeTarget = open federation seek (not directed at one wiki).
+  const challengeTarget = normalizeWikiSiteInput(raw.challengeTarget)
   const out = {
     status,
     config: {
       rated,
-      allowGuests,
       creatorColor: normalizeChallengeColor(cfg.creatorColor),
       minRating: minRating != null && maxRating != null ? Math.min(minRating, maxRating) : minRating,
       maxRating: minRating != null && maxRating != null ? Math.max(minRating, maxRating) : maxRating,
@@ -1728,15 +1823,12 @@ export function normalizeChallengeState(raw) {
   }
   const opponent = normalizeChallengeParticipant(raw.opponent)
   if (opponent) out.opponent = opponent
-  // Blank ChallengeTarget = open federation seek (not directed at one wiki).
-  const challengeTarget = normalizeWikiSiteInput(raw.challengeTarget)
   if (challengeTarget) out.challengeTarget = challengeTarget
   return out
 }
 
 export function buildOpenChallenge({
   rated = false,
-  allowGuests,
   creatorColor = CHALLENGE_COLOR_RANDOM,
   minRating = null,
   maxRating = null,
@@ -1750,8 +1842,6 @@ export function buildOpenChallenge({
     status: CHALLENGE_STATUS_OPEN,
     config: {
       rated,
-      // Explicit false hides the seek from anonymous visitors; rated always forces false.
-      allowGuests: rated ? false : allowGuests !== false,
       creatorColor,
       minRating,
       maxRating,
@@ -1803,15 +1893,10 @@ export function openChallengeFromPgn(pgn, { fallbackChallenge = null } = {}) {
       opponent = { id: oppId, site: parsePlayerId(oppId)?.domain || '' }
     }
   }
-  const allowTag = String(getPgnTag(text, 'AllowGuests') || '')
-    .trim()
-    .toLowerCase()
-  const allowGuests = rated ? false : allowTag !== 'no'
   return normalizeChallengeState({
     status: bothFilled ? CHALLENGE_STATUS_ACTIVE : CHALLENGE_STATUS_OPEN,
     config: {
       rated,
-      allowGuests,
       creatorColor,
       minRating: minRaw != null && minRaw !== '' ? Number(minRaw) : null,
       maxRating: maxRaw != null && maxRaw !== '' ? Number(maxRaw) : null,
@@ -1841,10 +1926,6 @@ export function stampOpenChallengePgn(pgn, challenge) {
         : 'Random'
   next = setPgnTag(next, 'CreatorColor', color)
   next = setPgnTag(next, 'Rated', c.config.rated ? 'yes' : 'no')
-  // Casual seeks stamp AllowGuests so federation peers can hide owner-only rows from guests.
-  // Rated seeks clear the tag (owners-only is implied by Rated=yes).
-  if (c.config.rated) next = clearPgnTag(next, 'AllowGuests')
-  else next = setPgnTag(next, 'AllowGuests', c.config.allowGuests ? 'yes' : 'no')
   if (c.config.minRating != null) next = setPgnTag(next, 'MinRating', String(c.config.minRating))
   if (c.config.maxRating != null) next = setPgnTag(next, 'MaxRating', String(c.config.maxRating))
   // Blank = open seek; omit the tag rather than writing an empty value.
@@ -1877,24 +1958,33 @@ export function challengeRatingGate(challenge, viewerRating) {
   return { ok: true, reason: null }
 }
 
-// Full join gate: rating window plus auth (rated / owners-only casual).
-export function challengeJoinGate(challenge, { viewerRating, isAuthenticatedOwner = false } = {}) {
+// Full join gate: rating window plus auth. Every federation seek is wiki-owners only;
+// directed invites also require viewing the ChallengeTarget wiki.
+export function challengeJoinGate(
+  challenge,
+  { viewerRating, isAuthenticatedOwner = false, viewingSite = '' } = {},
+) {
   const c = normalizeChallengeState(challenge)
   if (!c || c.status !== CHALLENGE_STATUS_OPEN) {
     return { ok: false, reason: CHALLENGE_REJECT_NOT_OPEN }
   }
-  if ((c.config.rated || c.config.allowGuests === false) && !isAuthenticatedOwner) {
+  if (!isAuthenticatedOwner) {
     return { ok: false, reason: CHALLENGE_REJECT_OWNERS_ONLY }
+  }
+  if (c.challengeTarget) {
+    const viewing = cleanSite(viewingSite)
+    if (viewing && !sitesMatch(c.challengeTarget, viewing)) {
+      return { ok: false, reason: CHALLENGE_REJECT_WRONG_SITE }
+    }
   }
   return challengeRatingGate(challenge, viewerRating)
 }
 
-// Hide rated / owners-only seeks from anonymous federation browsers entirely.
+// Hide open seeks from anonymous federation browsers — join requires a wiki owner login.
 export function challengeVisibleToViewer(challenge, { isAuthenticatedOwner = false } = {}) {
   const c = normalizeChallengeState(challenge)
   if (!c || c.status !== CHALLENGE_STATUS_OPEN) return false
-  if (c.config.rated || c.config.allowGuests === false) return Boolean(isAuthenticatedOwner)
-  return true
+  return Boolean(isAuthenticatedOwner)
 }
 
 export function stableSeatHash(idA, idB) {
@@ -1983,7 +2073,7 @@ export function normalizeOpenChallengeEntry(raw) {
   if (!raw || typeof raw !== 'object') return null
   const challenge = normalizeChallengeState(raw.challenge)
   if (!challenge || challenge.status !== CHALLENGE_STATUS_OPEN) return null
-  const site = cleanSite(raw.site ?? raw.host ?? challenge.creator?.site ?? challenge.creator?.host)
+  const site = cleanSite(raw.site ?? challenge.creator?.site)
   const itemId = String(raw.itemId || '').trim()
   const pgn = String(raw.pgn || '').trim()
   const pending = raw.pending === true
@@ -2051,7 +2141,7 @@ export function harvestPageOpenChallenge(raw) {
   if (pgnHasMoves(pgn)) return null
   const challenge = openChallengeFromPgn(pgn, { fallbackChallenge: raw.challenge })
   if (!challenge || !isOpenChallenge(challenge)) return null
-  const site = cleanSite(raw.site ?? raw.host ?? challenge.creator?.site ?? challenge.creator?.host)
+  const site = cleanSite(raw.site ?? challenge.creator?.site)
   const slug = String(raw.slug || '').trim()
   const itemId = String(raw.itemId || '').trim()
   if (!site || !slug || !itemId) return null
@@ -2072,7 +2162,7 @@ export function harvestDirectChallenge(raw) {
   if (!pgn || !/\[/.test(pgn)) return null
   const fromPgn = openChallengeFromPgn(pgn, { fallbackChallenge: raw.challenge })
   if (fromPgn && isOpenChallenge(fromPgn) && fromPgn.challengeTarget) {
-    const site = cleanSite(raw.site ?? raw.host ?? fromPgn.creator?.site ?? fromPgn.creator?.host)
+    const site = cleanSite(raw.site ?? fromPgn.creator?.site)
     const slug = String(raw.slug || '').trim()
     const itemId = String(raw.itemId || '').trim()
     if (!site || !slug || !itemId) return null
@@ -2106,7 +2196,7 @@ export function harvestDirectChallenge(raw) {
   if (settings.challengeCreatorColor === CHALLENGE_COLOR_RANDOM) {
     creatorColor = CHALLENGE_COLOR_RANDOM
   }
-  const site = cleanSite(raw.site ?? raw.host ?? parsed.domain)
+  const site = cleanSite(raw.site ?? parsed.domain)
   const slug = String(raw.slug || '').trim()
   const itemId = String(raw.itemId || '').trim()
   if (!site || !slug || !itemId) return null
@@ -2135,9 +2225,9 @@ export function harvestAcceptedGhostGame(raw) {
   const challenge = normalizeChallengeState(raw.challenge)
   if (!challenge || challenge.status !== CHALLENGE_STATUS_ACTIVE) return null
   if (challenge.challengeTarget) return null
-  const joinerSite = cleanSite(challenge.opponent?.site ?? challenge.opponent?.host)
-  const creatorSite = cleanSite(challenge.creator?.site ?? challenge.creator?.host)
-  const pageSite = cleanSite(raw.site ?? raw.host)
+  const joinerSite = cleanSite(challenge.opponent?.site)
+  const creatorSite = cleanSite(challenge.creator?.site)
+  const pageSite = cleanSite(raw.site)
   const slug = String(raw.slug || '').trim()
   const itemId = String(raw.itemId || '').trim()
   if (!joinerSite || !creatorSite || !pageSite || !slug || !itemId) return null
@@ -2163,20 +2253,20 @@ export function attachGhostAcceptances(entries, acceptedGames, viewingSite) {
   const byGhostId = new Map()
   for (const raw of Array.isArray(acceptedGames) ? acceptedGames : []) {
     const id = String(raw?.itemId || '').trim()
-    if (!id || !sitesMatch(raw?.challenge?.creator?.site ?? raw?.challenge?.creator?.host, self)) continue
+    if (!id || !sitesMatch(raw?.challenge?.creator?.site, self)) continue
     byGhostId.set(id, raw)
   }
   return (Array.isArray(entries) ? entries : []).map(entry => {
-    if (!entry || !sitesMatch(entry.site ?? entry.host, self) || !entry.pending) return entry
+    if (!entry || !sitesMatch(entry.site, self) || !entry.pending) return entry
     const acceptance = byGhostId.get(String(entry.itemId || '').trim())
     if (!acceptance) return entry
     const opponentLabel =
-      playerDisplayLabel(acceptance.challenge?.opponent?.id || '') || acceptance.site || acceptance.host
+      playerDisplayLabel(acceptance.challenge?.opponent?.id || '') || acceptance.site
     return {
       ...entry,
       accepted: true,
       acceptedGame: {
-        site: acceptance.site ?? acceptance.host,
+        site: acceptance.site,
         slug: acceptance.slug,
         title: acceptance.title,
       },
@@ -2189,20 +2279,20 @@ export function attachGhostAcceptances(entries, acceptedGames, viewingSite) {
 
 // Dedupe key: ghost seeks by site+itemId; direct invites by site+slug+itemId.
 function entryKey(e) {
-  const site = e?.site ?? e?.host
+  const site = e?.site
   if (e.pending || !String(e.slug || '').trim()) return `${site}|pending|${e.itemId}`
   return `${site}|${e.slug}|${e.itemId}`
 }
 
 function normalizeOpenChallengeAliases(row) {
   if (!row || typeof row !== 'object') return row
-  const site = row.site ?? row.host
-  const { host: _legacyHost, acceptedGame: rawAcceptedGame, ...rest } = row
+  const site = row.site
+  const { host: _omitHost, acceptedGame: rawAcceptedGame, ...rest } = row
   const challenge = normalizeChallengeState(row.challenge)
   const acceptedGame =
     rawAcceptedGame && typeof rawAcceptedGame === 'object'
       ? {
-          site: rawAcceptedGame.site ?? rawAcceptedGame.host,
+          site: rawAcceptedGame.site,
           slug: rawAcceptedGame.slug,
           title: rawAcceptedGame.title,
         }
@@ -2254,9 +2344,9 @@ export function partitionOpenChallenges(
     const isAcceptedOwn = Boolean(raw?.accepted && raw?.acceptedGame) || federationAccepted
     // Own seek accepted on a joiner wiki — keep a fork-back row (not a joinable open seat).
     if (isAcceptedOwn) {
-      const rawSite = raw?.site ?? raw?.host
+      const rawSite = raw?.site
       if (!self || !sitesMatch(rawSite, self)) continue
-      const creatorSite = cleanSite(raw?.challenge?.creator?.site ?? raw?.challenge?.creator?.host)
+      const creatorSite = cleanSite(raw?.challenge?.creator?.site)
       if (creatorSite && !sitesMatch(creatorSite, self)) continue
       const acceptance = acceptedById.get(ghostItemId) || raw
       const key = `${cleanSite(rawSite)}|pending|${ghostItemId || raw.itemId}`
@@ -2264,7 +2354,7 @@ export function partitionOpenChallenges(
       seen.add(key)
       const acceptedSource = raw.acceptedGame || acceptance
       const acceptedGame = {
-        site: acceptedSource.site ?? acceptedSource.host,
+        site: acceptedSource.site,
         slug: acceptedSource.slug,
         title: acceptedSource.title,
       }
@@ -2280,7 +2370,7 @@ export function partitionOpenChallenges(
           raw.opponentLabel ||
           playerDisplayLabel(acceptance.challenge?.opponent?.id || '') ||
           acceptedGame.site ||
-          acceptedGame.host,
+          acceptedGame.site,
         challenge: acceptance.challenge || raw.challenge,
         pgn: acceptance.pgn || raw.pgn || '',
         ts: Number(raw.ts) || Number(acceptance.ts) || 0,
@@ -2293,7 +2383,7 @@ export function partitionOpenChallenges(
     if (seen.has(key)) continue
     seen.add(key)
     if (self && sitesMatch(entry.site, self)) {
-      const creatorSite = cleanSite(entry.challenge?.creator?.site ?? entry.challenge?.creator?.host)
+      const creatorSite = cleanSite(entry.challenge?.creator?.site)
       // Forked My Chess Games pages can carry stale open-challenge metadata from another
       // wiki — only seeks whose creator matches this host are authoritative here.
       if (creatorSite && !sitesMatch(creatorSite, self)) continue
@@ -2303,7 +2393,12 @@ export function partitionOpenChallenges(
     const target = cleanSite(entry.challenge?.challengeTarget)
     if (target) {
       if (self && sitesMatch(target, self)) {
-        directedAtMe.push({ ...entry, canJoin: true, reason: null })
+        const gate = challengeJoinGate(entry.challenge, {
+          viewerRating: rating,
+          isAuthenticatedOwner: ownerViewer,
+          viewingSite: self,
+        })
+        directedAtMe.push({ ...entry, canJoin: gate.ok, reason: gate.reason })
       }
       continue
     }
@@ -2693,7 +2788,7 @@ export function harvestGhostOpenChallenge(raw) {
   if (!raw || typeof raw !== 'object') return null
   const challenge = normalizeChallengeState(raw.challenge)
   if (!challenge || !isOpenChallenge(challenge)) return null
-  const site = cleanSite(raw.site ?? raw.host ?? challenge.creator?.site ?? challenge.creator?.host)
+  const site = cleanSite(raw.site ?? challenge.creator?.site)
   const itemId = String(raw.itemId || '').trim()
   const pgn = String(raw.pgn || '').trim()
   if (!site || !itemId || !pgn) return null
@@ -2712,8 +2807,8 @@ export function harvestGhostOpenChallenge(raw) {
   })
 }
 
-// Open challenges posted after the survey-metadata change are stored on the SURVEY item
-// (`openChallenges`), not as sibling chess boards on My Chess Games.
+// Open challenges are stored on the My Chess Games page charm (`page.chess.openChallenges`),
+// not as sibling chess boards and not as SURVEY item journal metadata.
 export function openChallengeSurveyRecord(challenge, { itemId, pgn, title, slug = '' } = {}) {
   const normalized = normalizeChallengeState(challenge)
   const id = String(itemId || '').trim()
@@ -2728,6 +2823,22 @@ export function openChallengeSurveyRecord(challenge, { itemId, pgn, title, slug 
   const pageSlug = String(slug || '').trim()
   if (pageSlug) record.slug = pageSlug
   return record
+}
+
+// Legacy: seeks used to live on the SURVEY story item. Prefer page.chess once written.
+function legacySurveyItemOpenChallengeRecords(page) {
+  const surveyItem = findSurveyItem(Array.isArray(page?.story) ? page.story : [])
+  return normalizeSurveyOpenChallengeRecords(surveyItem?.openChallenges)
+}
+
+// Authoritative pending-seek list for My Chess Games (charm, with legacy item fallback).
+// Once `page.chess.openChallenges` exists (even `[]`), it wins — including after cancel-all.
+// gameIndex-only charm writes must not invent that key (see reviseChessCharmOnPage).
+export function readSurveyOpenChallengeRecords(page) {
+  if (Array.isArray(page?.chess?.openChallenges)) {
+    return normalizeSurveyOpenChallengeRecords(page.chess.openChallenges)
+  }
+  return legacySurveyItemOpenChallengeRecords(page)
 }
 
 // True when posting an open challenge from a create-preview / ghost page (nameable).
@@ -2749,19 +2860,19 @@ export function openChallengeUsesJoinGhost(entry) {
 
 export function openChallengeSurveyAuthoritative(pageSite, challenge) {
   const host = cleanSite(pageSite)
-  const creatorSite = cleanSite(challenge?.creator?.site ?? challenge?.creator?.host)
+  const creatorSite = cleanSite(challenge?.creator?.site)
   return Boolean(host && creatorSite && sitesMatch(host, creatorSite))
 }
 
-// Item ids in SURVEY `openChallenges` whose creator is another wiki (stale fork copies).
-export function foreignOpenChallengeItemIds(story, pageSite) {
+// Item ids in pending seeks whose creator is another wiki (stale fork copies).
+// Accepts a page object or a legacy story array.
+export function foreignOpenChallengeItemIds(pageOrStory, pageSite) {
   const host = cleanSite(pageSite)
   if (!host) return []
-  const surveyItem = findSurveyItem(Array.isArray(story) ? story : [])
-  const records = Array.isArray(surveyItem?.openChallenges) ? surveyItem.openChallenges : []
-  return records
+  const page = Array.isArray(pageOrStory) ? { story: pageOrStory } : pageOrStory
+  return readSurveyOpenChallengeRecords(page)
     .filter(row => {
-      const creatorSite = cleanSite(row?.challenge?.creator?.site ?? row?.challenge?.creator?.host)
+      const creatorSite = cleanSite(row?.challenge?.creator?.site)
       return creatorSite && !sitesMatch(creatorSite, host)
     })
     .map(row => String(row?.itemId || '').trim())
@@ -2769,36 +2880,31 @@ export function foreignOpenChallengeItemIds(story, pageSite) {
 }
 
 export function harvestSurveyOpenChallenges(page, host, _slug) {
-  const story = Array.isArray(page?.story) ? page.story : []
   const pageSite = cleanSite(host)
   if (!pageSite) return []
   const out = []
-  for (const entry of story) {
-    if (entry?.type !== 'chess' || !isSurveyItemText(entry.text)) continue
-    const records = Array.isArray(entry.openChallenges) ? entry.openChallenges : []
-    for (const raw of records) {
-      const challenge = normalizeChallengeState(raw?.challenge)
-      if (!openChallengeSurveyAuthoritative(pageSite, challenge)) continue
-      const harvested = harvestGhostOpenChallenge({
-        site: pageSite,
-        // Game-page slug from the survey record (not my-chess-games).
-        slug: String(raw?.slug || '').trim(),
-        title: raw?.title,
-        itemId: raw?.itemId,
-        pgn: raw?.pgn,
-        challenge,
-        pending: raw?.pending,
-      })
-      if (harvested) out.push(harvested)
-    }
+  for (const raw of readSurveyOpenChallengeRecords(page)) {
+    const challenge = normalizeChallengeState(raw?.challenge)
+    if (!openChallengeSurveyAuthoritative(pageSite, challenge)) continue
+    const harvested = harvestGhostOpenChallenge({
+      site: pageSite,
+      // Game-page slug from the survey record (not my-chess-games).
+      slug: String(raw?.slug || '').trim(),
+      title: raw?.title,
+      itemId: raw?.itemId,
+      pgn: raw?.pgn,
+      challenge,
+      pending: raw?.pending,
+    })
+    if (harvested) out.push(harvested)
   }
   return out
 }
 
-export function applyOpenChallengeSurveyEdit(surveyItem, { add = null, removeIds = [] } = {}) {
-  if (!surveyItem || surveyItem.type !== 'chess' || !isSurveyItemText(surveyItem.text)) return null
+// Pure list edit for pending seeks (page.chess.openChallenges).
+export function applyOpenChallengeRecordsEdit(records, { add = null, removeIds = [] } = {}) {
   const ids = new Set((Array.isArray(removeIds) ? removeIds : []).map(id => String(id || '').trim()).filter(Boolean))
-  let list = Array.isArray(surveyItem.openChallenges) ? [...surveyItem.openChallenges] : []
+  let list = normalizeSurveyOpenChallengeRecords(records)
   if (ids.size) list = list.filter(row => !ids.has(String(row?.itemId || '').trim()))
   if (add) {
     const record = openChallengeSurveyRecord(add.challenge, {
@@ -2812,6 +2918,14 @@ export function applyOpenChallengeSurveyEdit(surveyItem, { add = null, removeIds
     if (idx >= 0) list[idx] = record
     else list.push(record)
   }
+  return list
+}
+
+// Legacy helper: mutate SURVEY item metadata (tests / old pages). Prefer charm writes.
+export function applyOpenChallengeSurveyEdit(surveyItem, { add = null, removeIds = [] } = {}) {
+  if (!surveyItem || surveyItem.type !== 'chess' || !isSurveyItemText(surveyItem.text)) return null
+  const list = applyOpenChallengeRecordsEdit(surveyItem.openChallenges, { add, removeIds })
+  if (!list) return null
   const next = { ...surveyItem }
   if (list.length) next.openChallenges = list
   else delete next.openChallenges
@@ -2827,9 +2941,9 @@ export const DEFAULT_SURVEY_ID = 'global'
 
 // The well-known page every participant forks onto their own site: "My Chess Games".
 // It carries a single static `SURVEY` chess item. Pending open challenges are indexed
-// on that item as `openChallenges` metadata until an opponent accepts and a game page
-// is created. Playing a rated game opts the site into federated leaderboards — no
-// separate keyword is required.
+// on `page.chess.openChallenges` (journal-free page charm) until an opponent accepts
+// and a game page is created. Playing a rated game opts the site into federated
+// leaderboards — no separate keyword is required.
 export const SURVEY_PAGE_SLUG = 'my-chess-games'
 export const SURVEY_PAGE_TITLE = 'My Chess Games'
 
@@ -2989,12 +3103,63 @@ export async function fetchChessPluginIndexSites({
   }
 }
 
-// Seeds for federation survey / open-challenge crawls (local + opponents + neighbourhood + index).
+// wiki-plugin-present farm roster — same-level subdomain peers on this farm.
+// Soft-fails to [] when present is not installed or the roll endpoint errors.
+export const PRESENT_ROLL_URL = '/plugin/present/roll'
+
+// Parse `{ roll: [{ site, pages }] }` from present into peer host strings (port-aware, self excluded).
+export function parsePresentRollSites(payload, localSite) {
+  const roll = Array.isArray(payload?.roll) ? payload.roll : []
+  const names = roll.map(row => row?.site).filter(Boolean)
+  return farmPeerHostsFromDataDirs(localSite, names)
+}
+
+// Fetch local-farm sibling peers via wiki-plugin-present (`GET /plugin/present/roll`).
+export async function fetchFarmPeerSites({
+  fetchImpl = globalThis.fetch,
+  url = PRESENT_ROLL_URL,
+  localSite = '',
+  timeoutMs = 4000,
+} = {}) {
+  if (typeof fetchImpl !== 'function') return []
+  const local =
+    cleanSite(localSite) ||
+    (typeof globalThis.location !== 'undefined' ? cleanSite(globalThis.location.host) : '')
+  let timer = null
+  try {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+    if (ac && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        try {
+          ac.abort()
+        } catch {
+          /* ignore */
+        }
+      }, timeoutMs)
+    }
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: ac?.signal,
+      cache: 'no-store',
+    })
+    if (!res?.ok) return []
+    const data = typeof res.json === 'function' ? await res.json() : null
+    return parsePresentRollSites(data, local)
+  } catch {
+    return []
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+// Seeds for federation survey / open-challenge crawls (local + opponents + neighbourhood + farm peers + index).
 export function buildSurveyFetchSeeds(localSite, opts = {}) {
   const neighborhoodSites = opts.neighborhoodSites ?? []
   const knownOpponents = opts.knownOpponents ?? []
+  const farmPeerSites = opts.farmPeerSites ?? []
   const indexSites = opts.indexSites ?? []
-  return buildFetchTargets({ localSite, knownOpponents, neighborhoodSites, indexSites })
+  return buildFetchTargets({ localSite, knownOpponents, neighborhoodSites, farmPeerSites, indexSites })
 }
 
 // Build federation crawl seeds for open-challenge / site survey / visible-federation discovery.
@@ -3006,6 +3171,7 @@ export function buildSurveyFetchSeeds(localSite, opts = {}) {
 // refresh the index in the background via `refreshFederationSitesFromIndex`).
 export async function resolveFetchSeeds(site, localSite, opts = {}) {
   const neighborhoodSites = opts.neighborhoodSites ?? []
+  const farmPeerSites = opts.farmPeerSites ?? []
   const { indexSites, fetchIndex = true, fetchImpl, deferIndex = false } = opts
   const host = String(localSite || '')
     .trim()
@@ -3040,7 +3206,12 @@ export async function resolveFetchSeeds(site, localSite, opts = {}) {
   } else {
     index = cached.hosts
   }
-  return buildSurveyFetchSeeds(host, { neighborhoodSites, knownOpponents, indexSites: index })
+  return buildSurveyFetchSeeds(host, {
+    neighborhoodSites,
+    knownOpponents,
+    farmPeerSites,
+    indexSites: index,
+  })
 }
 
 // Federation-search / cached index hosts to sitemap-crawl as non-expanding leaves.
@@ -3089,7 +3260,7 @@ export const SURVEY_PAGE_STORY = [
   {
     type: 'paragraph',
     id: '913c9902ba83800a',
-    text: 'A survey of all your active and completed chess games, as well as open challenges.',
+    text: 'A survey of all your active and completed chess games, as well as open challenges. For more details read [[About Chess Plugin]].',
   },
   {
     type: 'chess',
@@ -3317,7 +3488,7 @@ export function rerankLeaderboardEntries(entries) {
 
 function normalizeLeaderboardEntry(row) {
   if (!row || typeof row !== 'object') return row
-  const site = row.site ?? row.host
+  const site = row.site
   const { host: _legacyHost, ...rest } = row
   return site == null ? rest : { ...rest, site }
 }
@@ -3338,7 +3509,7 @@ export function filterFederatedLeaderboardEntries(entries, mode, opts = {}) {
     m === 'neighborhood'
       ? dedupeSites([local, ...neighborhoodSites, ...neighborhoodOpponents, ...pastOpponents])
       : dedupeSites([local, ...pastOpponents])
-  return rerankLeaderboardEntries(rows.filter(row => allowList.some(h => sitesMatch(h, row?.site ?? row?.host))))
+  return rerankLeaderboardEntries(rows.filter(row => allowList.some(h => sitesMatch(h, row?.site))))
 }
 
 function gameRowPlayerMeta(tagFor) {
@@ -3538,7 +3709,7 @@ export function buildMyGamesList(pageGames, selfSite) {
       }
     }
     if (!seat) continue
-    const pageSite = cleanSite(entry?.host) || self
+    const pageSite = cleanSite(entry?.site) || self
     const slug = String(entry?.slug || '').trim()
     const itemId = String(entry?.itemId || '').trim()
     const dedupeKey = `${pageSite}|${slug}|${itemId || gameFingerprint(pgn) || `idx:${i}`}`
@@ -3648,8 +3819,8 @@ export function buildAcceptedGhostGamesList(acceptedGhosts, selfSite) {
   const out = []
   const seen = new Set()
   for (const raw of Array.isArray(acceptedGhosts) ? acceptedGhosts : []) {
-    if (!self || !sitesMatch(raw?.challenge?.creator?.site ?? raw?.challenge?.creator?.host, self)) continue
-    const gameSite = cleanSite(raw.site ?? raw.host)
+    if (!self || !sitesMatch(raw?.challenge?.creator?.site, self)) continue
+    const gameSite = cleanSite(raw.site)
     const slug = String(raw.slug || '').trim()
     const itemId = String(raw.itemId || '').trim()
     if (!gameSite || !slug || !itemId) continue
@@ -3679,7 +3850,7 @@ export function buildAcceptedGhostGamesList(acceptedGhosts, selfSite) {
             : creatorColor === CHALLENGE_COLOR_BLACK
               ? 'b'
               : ''
-    const oppSite = cleanSite(challenge?.opponent?.site ?? challenge?.opponent?.host) || gameSite
+    const oppSite = cleanSite(challenge?.opponent?.site) || gameSite
     out.push({
       slug,
       title: String(raw.title || '').trim() || slug,
@@ -3929,7 +4100,7 @@ function entrySortValue(entry, columnId) {
   if (!col) return Number(entry?.rating) || 0
   if (columnId === 'rank') return Number(entry?.rank) || 0
   if (columnId === 'player') {
-    return String(entry?.name || entry?.site || entry?.host || '').toLowerCase()
+    return String(entry?.name || entry?.site || '').toLowerCase()
   }
   if (columnId === 'winrate') {
     return (Number(entry?.games) || 0) >= WINRATE_MIN_GAMES ? Number(entry?.winRate) || 0 : -1
@@ -3944,7 +4115,7 @@ function entryFilterText(entry, columnId) {
   if (!col) return ''
   if (columnId === 'rank') return String(entry?.rank ?? '')
   if (columnId === 'player') {
-    const site = String(entry?.site || entry?.host || '').trim()
+    const site = String(entry?.site || '').trim()
     const name = String(entry?.name || '').trim()
     const display = leaderboardPlayerDisplayName(entry)
     return `${name} ${display} ${site}`.trim().toLowerCase()
@@ -3960,7 +4131,7 @@ function entryFilterText(entry, columnId) {
 // Visible name on the leaderboard Name column (not the domain line).
 // When the stored name is just the site host, prefer a short site label (e.g. Olga).
 export function leaderboardPlayerDisplayName(entry) {
-  const site = String(entry?.site || entry?.host || '').trim()
+  const site = String(entry?.site || '').trim()
   const name = String(entry?.name || '').trim()
   if (!name) return fallbackWikiSiteDisplayLabel(site) || site
   if (sitesMatch(name, site) || name.toLowerCase() === site.toLowerCase()) {
@@ -3994,13 +4165,13 @@ function compareLeaderboardEntries(a, b, columnId, dir) {
   }
   if ((b.rating || 0) !== (a.rating || 0)) return (b.rating || 0) - (a.rating || 0)
   if ((a.rd || 0) !== (b.rd || 0)) return (a.rd || 0) - (b.rd || 0)
-  const aSite = a.site ?? a.host ?? ''
-  const bSite = b.site ?? b.host ?? ''
+  const aSite = a.site ?? ''
+  const bSite = b.site ?? ''
   return aSite < bSite ? -1 : aSite > bSite ? 1 : 0
 }
 
 function leaderboardEntryKey(entry) {
-  return cleanSite(entry?.site ?? entry?.host) || String(entry?.name || '')
+  return cleanSite(entry?.site) || String(entry?.name || '')
 }
 
 export function rankLeaderboard(
@@ -4674,8 +4845,8 @@ export function buildLeaderboard({ games = [], hosts = null, now = Date.now(), r
 function compareEntries(a, b) {
   if (b.rating !== a.rating) return b.rating - a.rating
   if (a.rd !== b.rd) return a.rd - b.rd
-  const aSite = a.site ?? a.host ?? ''
-  const bSite = b.site ?? b.host ?? ''
+  const aSite = a.site ?? ''
+  const bSite = b.site ?? ''
   return aSite < bSite ? -1 : aSite > bSite ? 1 : 0
 }
 
@@ -4683,7 +4854,7 @@ export function standingFor(entries, { host = '', rating = null } = {}) {
   const board = Array.isArray(entries) ? entries : []
   const targetHost = cleanSite(host)
 
-  const own = targetHost ? board.find(e => sitesMatch(e.site ?? e.host, targetHost)) : null
+  const own = targetHost ? board.find(e => sitesMatch(e.site, targetHost)) : null
   if (own) {
     const total = board.length
     return { rank: own.rank, total, percentile: percentileFor(own.rank, total), listed: true }
@@ -4738,9 +4909,9 @@ const SITE_FETCH_MAX_PAGES = 250
 export const SITE_CRAWL_CACHE_MAX_HOSTS = 200
 
 // Normalize one host's sitemap+games crawl cache entry (IndexedDB / postMessage).
-export function normalizeSiteCrawlCacheEntry(raw, host = '') {
+export function normalizeSiteCrawlCacheEntry(raw, site = '') {
   if (!raw || typeof raw !== 'object') return null
-  const h = cleanSite(host || raw.host)
+  const s = cleanSite(site || raw.site)
   const sitemap = (Array.isArray(raw.sitemap) ? raw.sitemap : [])
     .map(entry => ({
       slug: String(entry?.slug || '').trim(),
@@ -4754,13 +4925,13 @@ export function normalizeSiteCrawlCacheEntry(raw, host = '') {
       pgn: typeof row?.pgn === 'string' ? row.pgn : '',
       itemId: row?.itemId,
       challenge: row?.challenge,
-      host: cleanSite(row?.host || h),
+      site: cleanSite(row?.site || s),
     }))
     .filter(row => row.slug && row.pgn.trim())
   const updatedAt = Number(raw.updatedAt)
   const gameIndexFingerprint = String(raw.gameIndexFingerprint || '').trim()
   return {
-    host: h,
+    site: s,
     updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0,
     sitemap,
     games,
@@ -4773,8 +4944,8 @@ export function normalizeSiteCrawlCache(raw) {
   const out = {}
   for (const [key, value] of Object.entries(raw)) {
     const entry = normalizeSiteCrawlCacheEntry(value, key)
-    if (!entry?.host) continue
-    out[entry.host] = entry
+    if (!entry?.site) continue
+    out[entry.site] = entry
   }
   return out
 }
@@ -4813,7 +4984,7 @@ export function buildCrawlHits({ sites = [], cacheHitSites = [], siteCrawlCache 
   for (const host of crawledSites) {
     const entry = cache[host]
     for (const row of Array.isArray(entry?.games) ? entry.games : []) {
-      const site = cleanSite(row?.host || host)
+      const site = cleanSite(row?.site || host)
       const slug = String(row?.slug || '').trim()
       if (!site || !slug) continue
       const key = `${site}/${slug}`
@@ -4847,7 +5018,7 @@ export function crawlHitGameReferences(games = []) {
   const out = []
   const seen = new Set()
   for (const row of Array.isArray(games) ? games : []) {
-    const site = cleanSite(row?.site ?? row?.host)
+    const site = cleanSite(row?.site)
     const slug = String(row?.slug || '').trim()
     if (!site || !slug) continue
     const key = `${site}/${slug}`
@@ -5005,7 +5176,7 @@ export function chessChallengesFromPage(page, host, slug) {
       if (direct) out.push(direct)
     }
   }
-  // Pending seeks live on the SURVEY item's `openChallenges` metadata until accepted.
+  // Pending seeks live on page.chess.openChallenges until accepted.
   out.push(...harvestSurveyOpenChallenges(page, host, slug))
   return out
 }
@@ -5036,7 +5207,7 @@ export function findSurveyItem(story) {
 }
 
 export function surveyOpenChallengesChanged(before, after) {
-  return JSON.stringify(before?.openChallenges || null) !== JSON.stringify(after?.openChallenges || null)
+  return openChallengesFingerprint(before) !== openChallengesFingerprint(after)
 }
 
 export function buildChallengeJoinStory(item, challenge, creatorSite) {
@@ -5172,48 +5343,58 @@ export function materializeJoinChallengePage(payload, { slug, title }) {
   return { page, slug }
 }
 
-export function syncOpenChallengeSurveyOnPage(page, { add = null, removeIds = [], host = '' } = {}) {
+export function syncOpenChallengeSurveyOnPage(page, { add = null, removeIds = [], site = '' } = {}) {
   const story = Array.isArray(page?.story) ? page.story : []
   const ids = (Array.isArray(removeIds) ? removeIds : []).map(id => String(id || '').trim()).filter(Boolean)
   const surveyItem = findSurveyItem(story)
   if (!surveyItem) return { changed: false, error: 'no-survey-item' }
 
+  let removedBoards = false
   for (const id of ids) {
     const entry = story.find(row => row?.id === id)
     if (entry?.type === 'chess' && !isSurveyItemText(entry?.text)) {
       applyPageAction(page, { type: 'remove', id })
+      removedBoards = true
     }
   }
+  if (removedBoards) page.story = rebuildStoryFromJournal(page)
 
-  const updated = applyOpenChallengeSurveyEdit(findSurveyItem(page.story), { add, removeIds: ids })
-  if (!updated) return { changed: false }
   if (!add && !ids.length) return { changed: false }
-  if (!surveyOpenChallengesChanged(surveyItem, updated) && !ids.length) {
+
+  const before = readSurveyOpenChallengeRecords(page)
+  const updated = applyOpenChallengeRecordsEdit(before, { add, removeIds: ids })
+  if (!updated) return { changed: false }
+
+  const charmAlready = Array.isArray(page?.chess?.openChallenges)
+  if (!surveyOpenChallengesChanged(before, updated) && charmAlready && !removedBoards) {
     return { changed: false }
   }
-  applyPageAction(page, { type: 'edit', id: surveyItem.id, item: updated })
-  page.story = rebuildStoryFromJournal(page)
 
-  // Keep gameIndex.challenges in sync with SURVEY openChallenges (refs only — no PGNs).
-  const pageHost = cleanSite(host)
-  const challengeRefs = (Array.isArray(updated.openChallenges) ? updated.openChallenges : [])
-    .map(row =>
-      normalizeGameIndexEntry({
-        host: cleanSite(row?.challenge?.creator?.site) || pageHost,
-        slug: String(row?.slug || '').trim() || SURVEY_PAGE_SLUG,
-        itemId: row?.itemId,
-        title: row?.title,
-      }),
-    )
-    .filter(Boolean)
-  const prevIndex = readGameIndex(page)
-  applyGameIndexToSurveyPage(page, {
-    ...prevIndex,
-    challenges: challengeRefs,
-    updatedAt: Date.now(),
-  })
-
-  return { changed: true }
+  // Keep gameIndex.challenges in sync (refs only — no PGNs). Skip gameIndex when the
+  // on-disk catalog has unreadable rows so sanitize cannot wipe active/completed refs.
+  const pageHost = cleanSite(site)
+  const patch = { openChallenges: updated }
+  const rawIndex = page?.chess?.gameIndex
+  if (!gameIndexHasUnreadableEntries(rawIndex)) {
+    const challengeRefs = updated
+      .map(row =>
+        normalizeGameIndexEntry({
+          site: cleanSite(row?.challenge?.creator?.site) || pageHost,
+          slug: String(row?.slug || '').trim() || SURVEY_PAGE_SLUG,
+          itemId: row?.itemId,
+          title: row?.title,
+        }),
+      )
+      .filter(Boolean)
+    const prevIndex = readGameIndex(page)
+    patch.gameIndex = {
+      ...prevIndex,
+      challenges: challengeRefs,
+      updatedAt: Date.now(),
+    }
+  }
+  const changed = reviseChessCharmOnPage(page, patch)
+  return { changed, gameIndexTouched: patch.gameIndex !== undefined }
 }
 
 const ACADEMY_MOVE_GAP_MS = 60_000
@@ -5503,7 +5684,7 @@ export async function fetchSiteContentAsync(site, host, slug) {
 }
 
 // Open-challenge discovery for one host: fetch only the SURVEY page (`my-chess-games`),
-// not the full sitemap. Pending seeks live on SURVEY `openChallenges` metadata.
+// not the full sitemap. Pending seeks live on page.chess.openChallenges.
 export async function fetchSiteSurveyChallengesAsync(site, host, slug = SURVEY_PAGE_SLUG) {
   if (!host || !site?.getPage) {
     return { challenges: [], acceptedGhosts: [], ok: false }
@@ -5677,7 +5858,7 @@ export async function fetchFederationGamesAsync(site, seeds, opts = {}) {
       bumpHopStat(hop, 'kept')
     }
     queued.add(o)
-    next.push({ host: o, hop })
+    next.push({ site: o, hop })
   }
 
   // Survey / neighbourhood: rated-opponent BFS from seeds. Mine: one hop from local.
@@ -5688,14 +5869,14 @@ export async function fetchFederationGamesAsync(site, seeds, opts = {}) {
     const batch = (Array.isArray(wave) ? wave : [])
       .map(item =>
         typeof item === 'string' || typeof item === 'number'
-          ? { host: cleanSite(item), hop: 0 }
-          : { host: cleanSite(item?.host), hop: Math.max(0, Math.trunc(Number(item?.hop) || 0)) },
+          ? { site: cleanSite(item), hop: 0 }
+          : { site: cleanSite(item?.site), hop: Math.max(0, Math.trunc(Number(item?.hop) || 0)) },
       )
-      .filter(({ host: h }) => h && !seen.has(h) && !isSiteBlocked(h, blocked))
+      .filter(({ site: h }) => h && !seen.has(h) && !isSiteBlocked(h, blocked))
     if (!batch.length) return finish()
 
     waveNumber += 1
-    for (const { host: h } of batch) {
+    for (const { site: h } of batch) {
       seen.add(h)
       queued.delete(h)
     }
@@ -5705,9 +5886,9 @@ export async function fetchFederationGamesAsync(site, seeds, opts = {}) {
       phase: 'crawl',
       message:
         batch.length === 1
-          ? `Crawling ${batch[0].host}…`
+          ? `Crawling ${batch[0].site}…`
           : `Crawling ${batch.length} sites (wave ${waveNumber})…`,
-      site: batch[0]?.host,
+      site: batch[0]?.site,
       hostIndex: seen.size - batch.length,
       hostTotal: seen.size + queued.size,
       wave: waveNumber,
@@ -5718,7 +5899,7 @@ export async function fetchFederationGamesAsync(site, seeds, opts = {}) {
       crawlStats: { ...crawlStats },
     })
 
-    const results = await mapWithConcurrency(batch, HOST_FETCH_CONCURRENCY, async ({ host: h, hop }) => {
+    const results = await mapWithConcurrency(batch, HOST_FETCH_CONCURRENCY, async ({ site: h, hop }) => {
       if (shouldAbort?.()) return null
       onProgress?.({
         phase: 'crawl',
@@ -5812,7 +5993,7 @@ export async function fetchFederationGamesAsync(site, seeds, opts = {}) {
       bumpHopStat(hop, 'kept')
     }
     queued.add(h)
-    seedWave.push({ host: h, hop })
+    seedWave.push({ site: h, hop })
   }
   return fetchWave(seedWave)
 }
@@ -5834,7 +6015,7 @@ async function fetchWikiPageChessRows(site, host, slug) {
           pgn: item.text,
           itemId: item.id,
           challenge: item.challenge,
-          host,
+          site: host,
         })
       }
       for (const challenge of chessChallengesFromPage({ title, story: [item] }, host, slug)) {
@@ -5845,7 +6026,7 @@ async function fetchWikiPageChessRows(site, host, slug) {
           pending: challenge.pending,
           pgn: challenge.pgn,
           challenge: challenge.challenge,
-          site: challenge.site ?? challenge.host,
+          site: challenge.site,
         })
       }
     }
@@ -5875,6 +6056,7 @@ export async function fetchSiteGamePagesAsync(site, host, opts = {}) {
     surveyPage = null
   }
 
+  const rawIndex = surveyPage?.chess?.gameIndex
   const index = surveyPage ? readGameIndex(surveyPage) : emptyGameIndex()
   const fetchSlugs = gameIndexFetchSlugs(index)
   const fingerprint = gameIndexFingerprint(index)
@@ -5888,15 +6070,25 @@ export async function fetchSiteGamePagesAsync(site, host, opts = {}) {
         pending: row.pending,
         pgn: row.pgn,
         challenge: row.challenge,
-        site: row.site ?? row.host ?? h,
+        site: row.site || h,
       })
     }
   }
 
-  // Empty catalog: rebuild from this site's sitemap once (local My Chess Games / past
-  // opponents). Federation crawls omit rebuildIfEmpty so peers without an index stay empty.
-  if (!fetchSlugs.length && opts.rebuildIfEmpty === true) {
+  // Empty or unreadable catalog: rebuild from this site's sitemap once (local My Chess
+  // Games / past opponents). Federation crawls omit rebuildIfEmpty so peers without an
+  // index stay empty.
+  const catalogNeedsRebuild =
+    opts.rebuildIfEmpty === true && (!fetchSlugs.length || gameIndexHasUnreadableEntries(rawIndex))
+  if (catalogNeedsRebuild) {
     const rebuilt = await rebuildSiteGamePagesFromSitemapAsync(site, h, { openChallenges })
+    if (Array.isArray(rebuilt?.pageGames)) {
+      const pruned = filterOpenChallengesStillSeeking(rebuilt.openChallenges, rebuilt.pageGames)
+      rebuilt.openChallenges = pruned
+      if (rebuilt.rebuiltGameIndex) {
+        rebuilt.rebuiltGameIndex = buildGameIndexFromPageGames(rebuilt.pageGames, h, { challenges: pruned })
+      }
+    }
     return rebuilt
   }
 
@@ -5904,9 +6096,10 @@ export async function fetchSiteGamePagesAsync(site, host, opts = {}) {
 
   const cached = normalizeSiteCrawlCacheEntry(opts.siteCache, h)
   if (fingerprint && cached?.gameIndexFingerprint === fingerprint && cached?.games?.length) {
+    const cachedGames = cached.games.map(row => ({ ...row, site: row.site || h }))
     return {
-      pageGames: cached.games.map(row => ({ ...row, host: row.host || h })),
-      openChallenges,
+      pageGames: cachedGames,
+      openChallenges: filterOpenChallengesStillSeeking(openChallenges, cachedGames),
       cacheHit: true,
       pagesFetched: 0,
       sitemapSnapshot: [],
@@ -5934,7 +6127,7 @@ export async function fetchSiteGamePagesAsync(site, host, opts = {}) {
   })
   return {
     pageGames,
-    openChallenges,
+    openChallenges: filterOpenChallengesStillSeeking(openChallenges, pageGames),
     cacheHit: false,
     pagesFetched: fetchSlugs.length,
     sitemapSnapshot: [],
@@ -6481,6 +6674,7 @@ export async function orchestrateSiteSurveyDeferredWork(site, localSite, opts = 
     knownFederationSites = null,
   } = opts
   const neighborhoodSites = opts.neighborhoodSites ?? []
+  const farmPeerSites = opts.farmPeerSites ?? []
   const host = String(localSite || '')
     .trim()
     .toLowerCase()
@@ -6515,6 +6709,7 @@ export async function orchestrateSiteSurveyDeferredWork(site, localSite, opts = 
               seeds: seeds || undefined,
               slug,
               neighborhoodSites,
+              farmPeerSites,
               blockList,
               onBatch,
               knownOpponents,
@@ -6553,8 +6748,9 @@ export async function buildSiteSurveyAsync(site, localSite, slug, opts = {}) {
   } = await fetchSiteGamePagesAsync(site, host, { rebuildIfEmpty: true })
   const fastPath = !includeFederationChallenges
   const pageGames = [...fetchedGames]
+  const prunedLocalChallenges = filterOpenChallengesStillSeeking(localChallenges, pageGames)
 
-  let openChallenges = localChallenges
+  let openChallenges = prunedLocalChallenges
   let acceptedGhosts = []
   let crawled = []
   if (includeFederationChallenges) {
@@ -6562,7 +6758,7 @@ export async function buildSiteSurveyAsync(site, localSite, slug, opts = {}) {
     const challengeResult = await fetchChallengesAsync(site, seeds, slug)
     acceptedGhosts = challengeResult.acceptedGhosts
     crawled = challengeResult.crawled
-    openChallenges = mergeOpenChallengeEntries(localChallenges, challengeResult.challenges)
+    openChallenges = mergeOpenChallengeEntries(prunedLocalChallenges, challengeResult.challenges)
   }
   const enrichedGames = fastPath ? pageGames : await enrichPageGamesWithTwinTerminals(site, pageGames, host)
   const localGames = buildMyGamesList(enrichedGames, host)
@@ -6572,12 +6768,24 @@ export async function buildSiteSurveyAsync(site, localSite, slug, opts = {}) {
   const hasRatedGame = siteHasRatedGames(pgns, host)
   const { entries } = buildLeaderboard({ games: pgns, now: Date.now() })
   const generatedAt = Date.now()
+  // Persist pruned local seeks onto page.chess so SURVEY-item leftovers stay hidden.
+  const persistOpenChallenges =
+    prunedLocalChallenges.length !== (Array.isArray(localChallenges) ? localChallenges.length : 0)
+      ? prunedLocalChallenges.map(row =>
+          openChallengeSurveyRecord(row.challenge, {
+            itemId: row.itemId,
+            pgn: row.pgn,
+            title: row.title,
+            slug: row.slug,
+          }),
+        ).filter(Boolean)
+      : null
 
   return {
     entries,
     meta: {
       mode: 'site',
-      host,
+      site: host,
       crawled: crawled.length,
       members: entries.length,
       games: myGames,
@@ -6587,6 +6795,7 @@ export async function buildSiteSurveyAsync(site, localSite, slug, opts = {}) {
       openChallengesPending: fastPath,
       siteGamesEnrichmentPending: fastPath,
       ...(rebuiltGameIndex ? { rebuiltGameIndex } : {}),
+      ...(persistOpenChallenges ? { persistOpenChallenges } : {}),
     },
   }
 }
@@ -6778,10 +6987,10 @@ export async function buildNeighborhoodBoardAsync(site, localSite, opts = {}) {
     syncMode = hasNeighbors ? 'neighborhood' : 'local'
   } else if (fromGames.entries?.length) {
     // Neighbour-site crawls can surface players not yet in IndexedDB — merge them in.
-    const have = new Set(surveyEntries.map(row => cleanSite(row?.site ?? row?.host)).filter(Boolean))
+    const have = new Set(surveyEntries.map(row => cleanSite(row?.site)).filter(Boolean))
     let merged = false
     for (const row of fromGames.entries) {
-      const rh = cleanSite(row?.site ?? row?.host)
+      const rh = cleanSite(row?.site)
       if (!rh || have.has(rh)) continue
       if (!roster.some(a => sitesMatch(a, rh))) continue
       surveyEntries.push(row)
@@ -7034,10 +7243,12 @@ export async function runNeighborhoodJob(type, job = {}) {
       })
     }
     case 'challenges': {
+      const farmPeerSites = Array.isArray(opts.farmPeerSites) ? opts.farmPeerSites : []
       const seeds =
         opts.seeds ||
         (await resolveFetchSeeds(site, host, {
           neighborhoodSites,
+          farmPeerSites,
           knownOpponents: opts.knownOpponents,
           knownFederationSites: opts.knownFederationSites,
           fetchIndex: opts.fetchIndex,
@@ -7054,6 +7265,7 @@ export async function runNeighborhoodJob(type, job = {}) {
           crawled: crawled.length,
           acceptedGhosts,
           responsiveHosts,
+          farmPeerSites,
         },
         acceptedGhosts,
         crawled,
@@ -7092,6 +7304,42 @@ export function farmSiteDirFromSite(host) {
   const h = cleanSite(host)
   if (!h) return ''
   return h.split(':')[0]
+}
+
+// Parent domain key for same-level farm siblings (strip leftmost label; port ignored).
+// `alice.localhost` → `localhost`; `olga.aolc.cc` → `aolc.cc`. Empty when no parent.
+export function farmPeerParentKey(host) {
+  const name = farmSiteDirFromSite(host)
+  if (!name) return ''
+  const parts = name.split('.').filter(Boolean)
+  if (parts.length < 2) return ''
+  return parts.slice(1).join('.').toLowerCase()
+}
+
+// Keep candidate hosts that share the local site's parent domain key (sibling subdomains).
+export function filterSiblingFarmPeers(localSite, candidateHosts) {
+  const local = cleanSite(localSite)
+  const parent = farmPeerParentKey(local)
+  if (!local || !parent) return []
+  const out = []
+  for (const raw of Array.isArray(candidateHosts) ? candidateHosts : []) {
+    const host = cleanSite(raw)
+    if (!host || sitesMatch(host, local)) continue
+    if (farmPeerParentKey(host) !== parent) continue
+    out.push(host)
+  }
+  return dedupeSites(out)
+}
+
+// Map present-roll / farm site names to peer host strings (attach port when the local site uses one).
+export function farmPeerHostsFromDataDirs(localSite, dirNames, { port } = {}) {
+  const local = cleanSite(localSite)
+  const peerPort = port != null && String(port).trim() !== '' ? String(port).trim() : loopbackPortForHost(local, '')
+  const candidates = (Array.isArray(dirNames) ? dirNames : [])
+    .map(name => String(name || '').trim().toLowerCase())
+    .filter(Boolean)
+    .map(name => (peerPort && !name.includes(':') ? `${name}:${peerPort}` : name))
+  return filterSiblingFarmPeers(local, candidates)
 }
 
 export function pageUrl(host, slug, protocol = protocolForSite(host)) {

@@ -18,7 +18,7 @@ The first word of a chess item's text can be a keyword that chooses a mode of pl
 
 `PUZZLE` - opens the chess puzzle mode. When online, puzzles are drawn from your wiki farm's shared database (if the farm operator enabled it) or the [Lichess puzzle API](https://database.lichess.org/#puzzles). Active filters (rating, popularity, themes, tags) show in the puzzle header and can be set in item text — see Chess Keyword Examples. A single item can combine those filters with inline JSONL puzzles and `pages=` references to other wiki pages; the first inline puzzle leads the lesson, then **New Puzzle** alternates matching curated and farm/Lichess draws. For **teaching**, a referenced page may host one larger annotated **PGN** (`[FEN]` + mainline `{comments}` + variation comments as soft coaches). Lesson and Puzzle Coach progress (`done=`, `next=`, `solved=` / `failed=`) is written into the chess item on the page — on a site you do not own that becomes a yellow Local Changes fork you can export and restore later. If you install Federated Wiki Chess as a PWA from the popup window, you can optionally download a copy of the puzzle database to your device for offline play.
 
-`SURVEY` - a chess item with this keyword is on your **My Chess Games** page by default. It helps you track completed and ongoing chess games on your site. Federation **open challenges** are game pages with one open seat; challenge config lives in PGN tags (`MinRating`, `MaxRating`, `ChallengeTarget`, `ChallengeTs`, `CreatorRating`, `ChallengeCreator`, `CreatorColor`, `Rated`, casual `AllowGuests`). `ChallengeTarget` may be blank for an open federation seek. Rated seeks (and casual `AllowGuests=no`) are wiki-owners only; guests who join casual open seeks are seated as `Guest`, not the site owner name. Posting a seek from a named page keeps the open seat on that page; create-preview / ghost flows still use pending join ghosts.
+`SURVEY` - a chess item with this keyword is on your **My Chess Games** page by default. It helps you track completed and ongoing chess games on your site. Federation **open challenges** are game pages with one open seat; challenge config lives in PGN tags (`MinRating`, `MaxRating`, `ChallengeTarget`, `ChallengeTs`, `CreatorRating`, `ChallengeCreator`, `CreatorColor`, `Rated`). `ChallengeTarget` may be blank for an open federation seek. Open challenges are for signed-in wiki owners only. Posting a seek from a named page keeps the open seat on that page; create-preview / ghost flows still use pending join ghosts.
 
 `LEADERBOARD` - on the **Chess Leaderboards** page (`chess-leaderboards`). Opens the federated rankings view. Federation gossip (`checkpoint`, `trustedPeers`) lives in hidden `page.chess` metadata — the visible story holds only the keyword item.
 
@@ -44,7 +44,7 @@ Each player tracks three numbers: **rating** (`r`), **rating deviation** (`RD` =
 
 **Separate engine track.** A personal vs-Stockfish rating (`engine` field in IndexedDB) updates on every engine game but is never federated or ranked.
 
-**Well-known federation pages.** `my-chess-games` carries a bare `SURVEY` item; `chess-leaderboards` carries `LEADERBOARD`. Federation gossip (`checkpoint`, `trustedPeers`) is stored directly in `page.chess` — not duplicated as journal noise. Open seeks are ordinary game pages whose PGN carries the challenge tags; pending seeks are also indexed on the SURVEY item’s `openChallenges` metadata until accepted.
+**Well-known federation pages.** `my-chess-games` carries a bare `SURVEY` item; `chess-leaderboards` carries `LEADERBOARD`. Federation gossip (`checkpoint`, `trustedPeers`) and pending open seeks (`openChallenges`) are stored directly in `page.chess` — not duplicated as journal noise. Open seeks are ordinary game pages whose PGN carries the challenge tags; pending seeks stay in that page charm until accepted.
 
 Further reading: [Glickman's Glicko-2 example (PDF)](https://www.glicko.net/glicko/glicko2.pdf).
 
@@ -59,12 +59,12 @@ The puzzle mode works out of the box via the online [Lichess puzzle API](https:/
 A `PUZZLE` item can be a small, evolving curriculum rather than one fixed board. Put pool settings on its first line, then add zero or more custom puzzles as **JSONL** (one complete JSON object per physical line):
 
 ```text
-PUZZLE RANDOM rating=800..1400 themes=fork,pin pages=the-fork,my-annotated-forks
+PUZZLE RANDOM rating=800..1400 themes=fork pages=the-fork,my-annotated-forks
 {"id":"club-fork-1","fen":"4k3/8/8/3N4/8/8/8/4K3 w - - 0 1","moves":["d5c7"],"rating":900,"themes":["fork"],"tags":["club-study"],"prompt":"Fork the king and the loose piece.","source":"custom","noSetup":true}
 {"id":"game-2026-07-17","fen":"...","moves":["e4e5","g1f3"],"rating":1100,"themes":["fork"],"tags":["old-game"],"gameUrl":"..."}
 ```
 
-- `RANDOM` skips the chooser. `rating=`, `popularity=`, and Lichess `themes=` filter every source. Multiple themes are OR matches.
+- `RANDOM` skips the chooser. `rating=`, `popularity=`, and Lichess `themes=` filter every source. Multiple themes are AND matches (every listed theme must appear — e.g. `themes=fork,mateIn1`).
 - `tags=` filters author-defined JSONL tags. Use Lichess theme ids in `themes` when a custom puzzle should mix with Lichess results.
 - The first matching inline puzzle opens first. Later draws alternate between curated puzzles and the farm/on-device/Lichess pool when network-compatible filters are present.
 - `pages=slug-one,slug-two` loads chess items from those pages on the current wiki. A referenced item may contain JSONL/CSV puzzles or one fully annotated teaching PGN. References are one level deep, so pages cannot create loops.

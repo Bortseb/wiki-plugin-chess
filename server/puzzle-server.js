@@ -105,18 +105,24 @@ export async function estimateFilteredPuzzleDatabase(
   const n = offsets.length
   let matches = 0
   let tried = 0
+  const themeCounts = Object.create(null)
   for (let i = 0; i < sampleSize; i++) {
     const idx = 1 + Math.floor(Math.random() * Math.max(1, n - 1))
     const line = await readLine(fd, offsets[idx])
     const puzzle = parsePuzzleRow(line)
     if (!puzzle) continue
     tried++
-    if (puzzleMatchesFilters(puzzle, filters)) matches++
+    if (!puzzleMatchesFilters(puzzle, filters)) continue
+    matches++
+    for (const theme of puzzle.themes || []) {
+      if (!theme) continue
+      themeCounts[theme] = (themeCounts[theme] || 0) + 1
+    }
   }
   const matchRatio = tried > 0 ? matches / tried : 0
   const filteredCount = Math.round(totalCount * matchRatio)
   const filteredBytes = Math.max(4096, Math.round(fullBytes * matchRatio))
-  return { totalCount, filteredCount, fullBytes, filteredBytes, matchRatio }
+  return { totalCount, filteredCount, fullBytes, filteredBytes, matchRatio, themeCounts }
 }
 
 // Stream a filter-scoped CSV export. Read the decompressed CSV sequentially —
@@ -451,30 +457,25 @@ export function startServer(params) {
     }
   }
 
+  // Public puzzle/config GETs may be read cross-origin; no credentials.
   const cors = (req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*')
     next()
   }
 
-  const pwaCors = (req, res, next) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*')
-    res.header('Access-Control-Allow-Credentials', 'true')
-    res.header('Access-Control-Allow-Headers', 'Content-Type')
-    next()
-  }
-
   // In-scope manifest URL (/plugins/chess/) — Chrome is picky about installability.
+  // Same-origin install/PWA only — no credentialed CORS reflection.
   const serveChessManifest = async (req, res) => {
     const { chessPwaManifest } = await import('./pwa-bridge.js')
     res.type('application/manifest+json')
     res.json(chessPwaManifest(req, argv))
   }
-  app.get('/plugins/chess/manifest.webmanifest', pwaCors, serveChessManifest)
-  app.get('/plugins/chess/manifest.json', pwaCors, serveChessManifest)
+  app.get('/plugins/chess/manifest.webmanifest', serveChessManifest)
+  app.get('/plugins/chess/manifest.json', serveChessManifest)
 
-  // Installed-PWA wiki bridge — dynamic import on first use only.
+  // Shell-less wiki bridge (installed PWA + DirectTab) — same-origin only.
   let pwaBridgeRouter = null
-  app.use('/plugin/chess/pwa', pwaCors, async (req, res, next) => {
+  app.use('/plugin/chess/pwa', async (req, res, next) => {
     try {
       if (!pwaBridgeRouter) {
         const { createPwaBridgeRouter } = await import('./pwa-bridge.js')

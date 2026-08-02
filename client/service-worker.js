@@ -1,25 +1,28 @@
 /**
- * Service worker for the Federated Wiki Chess PWA / popup window.
- *
- * Precaches the app shell so the standalone chess window installs and plays offline.
- * Network-first fetch — prefer live builds, fall back to cache when offline.
- * Manifest is always fetched from the network (never cached) so install metadata stays current.
- * Bump CACHE_NAME whenever the precached asset list or fetch policy changes.
- * Freshness: wiki-server serves /plugins/chess/* with max-age=1h; this worker
- * uses cache:'no-store' so online PWAs pick up new builds (hop dials, etc.).
+ * Chess PWA / popup SW. Precaches the app shell; cooperates with parent wiki pack:
+ * activate only retires wiki-chess-pwa-cache-* (never fedwiki-pwa-* or puzzle DB);
+ * miss falls back to fedwiki-pwa-*; warm cache-first (Android often lies about online).
+ * Parent wiki-client SW (domain PWA) warms this list into CACHE_NAME + fedwiki-pwa-* and
+ * must not cache /plugin/chess/pwa/* (bridge stays network-only here and there).
+ * Bump CACHE_NAME when assets/policy change. Keep wiki-chess-pwa-cache- prefix.
  */
-const CACHE_NAME = 'wiki-chess-pwa-cache-v97'
+const CACHE_NAME = 'wiki-chess-pwa-cache-v1'
+const CHESS_CACHE_PREFIX = 'wiki-chess-pwa-cache-'
+const PARENT_CACHE_PREFIX = 'fedwiki-pwa-'
 
-// Relative to this script URL (/plugins/chess/service-worker.js).
+// Relative to /plugins/chess/service-worker.js — parent pack parses this list too.
 const assetsToCache = [
   './',
   'index.html',
+  'chess.js',
   'chess-app.js',
   'cm-modules-bundle.js',
+  'glicko-worker.js',
   'icon-120.png',
   'icon-180.png',
   'icon-192.png',
   'icon-512.png',
+  'assets/books/openings.bin',
   'assets/js/stockfish-18-lite-single.js',
   'assets/js/stockfish-18-lite-single.wasm',
   'assets/js/bootstrap.bundle.min.js',
@@ -29,6 +32,7 @@ const assetsToCache = [
   'assets/styles/all.min.css',
   'assets/styles/cm-modules.css',
   'assets/styles/wiki-chess.css',
+  'assets/styles/chessboard.css',
   'assets/pieces/merida.svg',
   'assets/pieces/celtic.svg',
   'assets/pieces/cburnett.svg',
@@ -39,30 +43,66 @@ const assetsToCache = [
   'assets/pieces/pixel.svg',
   'assets/pieces/shapes.svg',
   'assets/extensions/markers/markers.svg',
+  'assets/extensions/markers/markers.css',
+  'assets/extensions/arrows/arrows.css',
+  'assets/extensions/arrows/arrows.svg',
+  'assets/extensions/promotion-dialog/promotion-dialog.css',
+  'assets/extensions/select-piece-dialog.css',
+  'assets/images/chessboard-sprite.svg',
+  'assets/sounds/chess_console_sounds.mp3',
+  'assets/chess/webfonts/fa-brands-400.woff2',
+  'assets/chess/webfonts/fa-regular-400.woff2',
+  'assets/chess/webfonts/fa-solid-900.woff2',
+  'assets/chess/webfonts/fa-brands-400.woff',
+  'assets/chess/webfonts/fa-regular-400.woff',
+  'assets/chess/webfonts/fa-solid-900.woff',
 ]
 
-function precacheUrl(relativePath) {
-  return new URL(relativePath, self.location).href
+const precacheUrl = rel => new URL(rel, self.location).href
+const isManifestRequest = url => /\/manifest\.(?:json|webmanifest)$/.test(url.pathname)
+const isPwaBridgeRequest = url => /\/plugin\/chess\/pwa(?:\/|$)/.test(url.pathname)
+const offline503 = () => new Response('', { status: 503, statusText: 'Offline' })
+
+async function matchInCache(cache, request) {
+  const pathname = new URL(request.url).pathname
+  return (
+    (await cache.match(request, { ignoreSearch: true })) ||
+    (await cache.match(pathname, { ignoreSearch: true })) ||
+    (await cache.match(request)) ||
+    null
+  )
 }
 
-function isManifestRequest(url) {
-  return /\/manifest\.(?:json|webmanifest)$/.test(url.pathname)
+async function matchChessCache(request) {
+  const hit = await matchInCache(await caches.open(CACHE_NAME), request)
+  if (hit) return hit
+  try {
+    for (const key of await caches.keys()) {
+      if (!key.startsWith(PARENT_CACHE_PREFIX)) continue
+      const parentHit = await matchInCache(await caches.open(key), request)
+      if (parentHit) return parentHit
+    }
+  } catch {
+    /* keep */
+  }
+  return null
 }
 
-// Auth + journal bridge must hit the wiki origin directly — a SW network blip
-// would otherwise surface as a locked padlock / yellow-halo flash on mobile focus.
-function isPwaBridgeRequest(url) {
-  return /\/plugin\/chess\/pwa(?:\/|$)/.test(url.pathname)
+async function putChessCache(request, response) {
+  if (!response?.ok || request.method !== 'GET') return
+  try {
+    await (await caches.open(CACHE_NAME)).put(request, response.clone())
+  } catch {
+    /* keep */
+  }
 }
 
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE_NAME).then(cache =>
       Promise.all(
-        assetsToCache.map(relativePath =>
-          cache.add(precacheUrl(relativePath)).catch(err => {
-            console.warn('wiki-chess SW: precache skip', relativePath, err)
-          }),
+        assetsToCache.map(rel =>
+          cache.add(precacheUrl(rel)).catch(err => console.warn('wiki-chess SW: precache skip', rel, err)),
         ),
       ),
     ),
@@ -74,7 +114,9 @@ self.addEventListener('activate', e => {
   e.waitUntil(
     caches
       .keys()
-      .then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))
+      .then(keys =>
+        Promise.all(keys.filter(k => k.startsWith(CHESS_CACHE_PREFIX) && k !== CACHE_NAME).map(k => caches.delete(k))),
+      )
       .then(() => self.clients.claim()),
   )
 })
@@ -85,12 +127,34 @@ self.addEventListener('fetch', event => {
     event.respondWith(fetch(event.request))
     return
   }
+  if (url.origin !== self.location.origin) return
 
-  // Bypass the browser HTTP cache (wiki-server sets max-age=1h on /plugins/chess/*).
-  // Network-first still falls back to the precache when offline.
   event.respondWith(
-    fetch(event.request, { cache: 'no-store' })
-      .then(response => response)
-      .catch(() => caches.match(event.request).then(hit => hit || caches.match(event.request, { ignoreSearch: true }))),
+    (async () => {
+      if (navigator.onLine === false) return (await matchChessCache(event.request)) || offline503()
+
+      const warm = await matchChessCache(event.request)
+      if (warm) {
+        fetch(event.request, { cache: 'no-store' })
+          .then(res => {
+            if (res?.ok) putChessCache(event.request, res)
+          })
+          .catch(() => {})
+        return warm
+      }
+
+      try {
+        const signal =
+          typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined
+        const res = await fetch(event.request, { cache: 'no-store', signal })
+        if (res?.ok) {
+          await putChessCache(event.request, res)
+          return res
+        }
+        return (await matchChessCache(event.request)) || res
+      } catch {
+        return (await matchChessCache(event.request)) || offline503()
+      }
+    })(),
   )
 })

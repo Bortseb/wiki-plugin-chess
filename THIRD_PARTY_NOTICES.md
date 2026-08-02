@@ -37,7 +37,7 @@ SOFTWARE.
 | ----------------------------------------- | ----------------------- | ---------------------------------------------------------- |
 | Bootstrap                                 | 5.3.x                   | Copyright 2011–2024 The Bootstrap Authors                  |
 | bootstrap-auto-dark-mode                  | 1.1.x                   | Copyright Stefan Haack (https://shaack.com)                |
-| chess-console                             | 6.13.x                  | Copyright Stefan Haack (https://shaack.com)                |
+| chess-console                             | 6.14.x                  | Copyright Stefan Haack (https://shaack.com)                |
 | chess-console-stockfish                   | 6.4.x                   | Copyright Stefan Haack (https://shaack.com)                |
 | cm-chessboard                             | 8.12.x                  | Copyright Stefan Haack (https://shaack.com)                |
 | cm-engine-runner                          | 2.0.x                   | Copyright Stefan Haack (https://shaack.com)                |

@@ -33,16 +33,15 @@ import {
   keepGhostUntilSeatsFilled,
   claimSeat,
   getSeatClaimOffer,
+  canClaimOpenSeatAsViewer,
   upgradeGuestSeatTagsToWikiIdentity,
   isPlainGuestSeatTag,
   GUEST_PLAYER_NAME,
   detectClipboardChessFormat,
-  isPasteActionable,
   isPasteContentValid,
   isValidFenString,
   lastMoveFromEnPassantTarget,
   fenBeforeEnPassantDoubleStep,
-  fenPieceColorAt,
   isEditableChessItemText,
   resolvePasteItemText,
   createPasteCapturePayload,
@@ -90,6 +89,7 @@ import {
   puzzleMatchesFilters,
   puzzleThemeLabel,
   resolvePuzzleThemeKey,
+  rankCommonPuzzleThemes,
   PUZZLE_COMMON_THEME_IDS,
   PUZZLE_THEME_OPTIONS,
   chessJournalSymbol,
@@ -303,7 +303,7 @@ describe('lib · chess-core', () => {
     assert.equal(stockfishDisplayLabel(3), `Stockfish Level 3 (${stockfishLevelElo(3)})`)
   })
 
-  it('builds wiki site links with copy-friendly host labels', () => {
+  it('builds wiki site labels as selectable text (not navigable links)', () => {
     assert.equal(WIKI_HOME_PAGE_SLUG, 'welcome-visitors')
     assert.equal(wikiSiteLinkLabel('example.com:443'), 'example.com')
     assert.equal(wikiSiteLinkLabel('example.com'), 'example.com')
@@ -311,12 +311,12 @@ describe('lib · chess-core', () => {
     assert.equal(wikiSitePageUrl('ff.localhost:3001'), 'http://ff.localhost:3001/welcome-visitors.html')
     assert.equal(wikiSitePageUrl('example.com'), 'https://example.com/welcome-visitors.html')
     const html = playerDisplayLabelHtml('ff.localhost:3001 (Rob)')
-    assert.match(html, /href="http:\/\/ff\.localhost:3001\/welcome-visitors\.html"/)
+    assert.doesNotMatch(html, /<a\b/)
     assert.match(html, /Rob/)
-    assert.match(html, />ff\.localhost:3001</)
-    assert.match(playerDisplayLabelHtml('example.com (Ada)'), /href="https:\/\/example\.com\/welcome-visitors\.html"/)
+    assert.match(html, /<span class="wiki-chess-wiki-site-link">ff\.localhost:3001<\/span>/)
+    assert.doesNotMatch(playerDisplayLabelHtml('example.com (Ada)'), /<a\b/)
     assert.match(playerDisplayLabelHtml('example.com (Ada)'), /Ada/)
-    assert.match(playerDisplayLabelHtml('example.com (Ada)'), />example\.com</)
+    assert.match(playerDisplayLabelHtml('example.com (Ada)'), /<span class="wiki-chess-wiki-site-link">example\.com<\/span>/)
     assert.equal(formatPlayerDisplayLabel('chess.aolc.cc (Wiki Cafe)'), 'Wiki Cafe (chess.aolc.cc)')
   })
 
@@ -380,7 +380,6 @@ describe('lib · chess-core', () => {
     const instant = gameStartInstant({ utcDate: getPgnTag(pgn, 'UTCDate'), utcTime: getPgnTag(pgn, 'UTCTime') })
     assert.ok(instant instanceof Date)
     assert.ok(Math.abs(Date.now() - instant.getTime()) < 60_000)
-    // Games saved before start instants were stamped read as null (list shows date only).
     assert.equal(gameStartInstant({ utcDate: '', utcTime: '' }), null)
   })
 
@@ -434,10 +433,13 @@ describe('lib · chess-core', () => {
 
   it('keeps an open seat when the opponent tag was dropped from a human challenge', () => {
     const local = 'elif.localhost:3001 (Elif)'
-    const pgn = normalizePgnPlayers(`[White "${local}"]\n[HumanPlay "remote"]\n[Result "*"]`, {
-      ownerName: 'Elif',
-      wikiSite: 'elif.localhost:3001',
-    })
+    const pgn = normalizePgnPlayers(
+      `[White "${local}"]\n[HumanPlay "correspondence"]\n[Result "*"]`,
+      {
+        ownerName: 'Elif',
+        wikiSite: 'elif.localhost:3001',
+      },
+    )
     assert.equal(getPgnTag(pgn, 'White'), local)
     assert.equal(getPgnTag(pgn, 'Black'), '')
   })
@@ -459,6 +461,39 @@ describe('lib · chess-core', () => {
     assert.equal(getPgnTag(next, 'Black'), 'Stockfish Level 3')
   })
 
+  it('does not steal an opponent Guest seat when this wiki already holds the other side', () => {
+    // Ward accepted a directed challenge while unauthenticated (White=Guest); Rob forks back.
+    const pgn = [
+      `[White "${GUEST_PLAYER_NAME}"]`,
+      '[Black "rob.chess.aolc.cc (Rob)"]',
+      '[HumanPlay "correspondence"]',
+      '[Result "*"]',
+      '',
+      '*',
+    ].join('\n')
+    const upgraded = upgradeGuestSeatTagsToWikiIdentity(pgn, {
+      signedInDisplayName: 'Rob',
+      wikiSite: 'rob.chess.aolc.cc',
+    })
+    assert.equal(getPgnTag(upgraded, 'White'), GUEST_PLAYER_NAME)
+    assert.equal(getPgnTag(upgraded, 'Black'), 'rob.chess.aolc.cc (Rob)')
+
+    const normalized = normalizePgnPlayers(pgn, {
+      signedInDisplayName: 'Rob',
+      wikiSite: 'rob.chess.aolc.cc',
+    })
+    assert.equal(getPgnTag(normalized, 'White'), GUEST_PLAYER_NAME)
+    assert.equal(getPgnTag(normalized, 'Black'), 'rob.chess.aolc.cc (Rob)')
+
+    const prepared = prepareWikiPgn(pgn, {
+      signedInDisplayName: 'Rob',
+      wikiSite: 'rob.chess.aolc.cc',
+      pageOnThisWiki: true,
+    })
+    assert.equal(getPgnTag(prepared, 'White'), GUEST_PLAYER_NAME)
+    assert.equal(getPgnTag(prepared, 'Black'), 'rob.chess.aolc.cc (Rob)')
+  })
+
   it('offers wiki join on open seats only when browsing a remote challenge', () => {
     const pgn = buildStartPgn({
       gameType: 'human',
@@ -477,6 +512,39 @@ describe('lib · chess-core', () => {
     assert.equal(offer.options.length, 1)
     assert.equal(offer.options[0].seat, 'White')
     assert.equal(getPgnTag(pgn, 'Black'), 'frank.localhost (frank)')
+  })
+
+  it('blocks guests from claiming a directed wiki challenge seat', () => {
+    const pgn = buildStartPgn({
+      gameType: 'human',
+      ownerName: 'Rob',
+      wikiSite: 'rob.chess.aolc.cc',
+      localSeat: 'w',
+      rated: false,
+      challengeTarget: 'ward.chess.aolc.cc',
+      challengeCreator: 'rob.chess.aolc.cc (Rob)',
+      creatorColorPref: 'Random',
+    })
+    assert.equal(canClaimOpenSeatAsViewer(pgn, { viewingSite: 'ward.chess.aolc.cc' }), false)
+    assert.equal(
+      getSeatClaimOffer(pgn, {
+        wikiSite: 'ward.chess.aolc.cc',
+        pageOnThisWiki: false,
+        guestName: 'Guest',
+      }),
+      null,
+    )
+    const ownerOffer = getSeatClaimOffer(pgn, {
+      signedInDisplayName: 'Ward',
+      wikiSite: 'ward.chess.aolc.cc',
+      pageOnThisWiki: false,
+      wikiJoinId: 'ward.chess.aolc.cc (Ward)',
+      guestName: 'Guest',
+    })
+    assert.ok(ownerOffer)
+    assert.equal(ownerOffer.localId, 'ward.chess.aolc.cc (Ward)')
+    assert.equal(ownerOffer.options[0].seat, 'Black')
+    assert.equal(ownerOffer.options[0].challenge, true)
   })
 
   it('clears the start menu once a real PGN is saved', () => {
@@ -549,7 +617,7 @@ describe('lib · chess-core', () => {
     it('treats FEN and PGN as actionable paste', () => {
       const fenDetected = detectClipboardChessFormat(STARTING_FEN)
       assert.equal(fenDetected.format, 'FEN')
-      assert.equal(isPasteActionable(fenDetected), true)
+      assert.equal(isPasteContentValid(STARTING_FEN, fenDetected), true)
       assert.equal(resolvePasteItemText(STARTING_FEN, fenDetected), STARTING_FEN)
 
       const pgn = '[White "a"]\n[Black "b"]\n\n1. e4 e5'
@@ -560,11 +628,10 @@ describe('lib · chess-core', () => {
 
     it('rejects bare keywords and unknown text', () => {
       const keyword = detectClipboardChessFormat('GAME')
-      assert.equal(isPasteActionable(keyword), false)
+      assert.equal(isPasteContentValid('GAME', keyword), false)
       assert.equal(createPasteCapturePayload('GAME').actionable, false)
 
       const unknown = detectClipboardChessFormat('hello world')
-      assert.equal(isPasteActionable(unknown), false)
       assert.equal(isPasteContentValid('hello world', unknown), false)
     })
 
@@ -579,14 +646,6 @@ describe('lib · chess-core', () => {
     it('accepts a real FEN position', () => {
       assert.equal(isValidFenString(STARTING_FEN), true)
       assert.equal(isPasteContentValid(STARTING_FEN), true)
-    })
-
-    it('reads the piece color on a FEN square (reselect-gesture guard)', () => {
-      assert.equal(fenPieceColorAt(STARTING_FEN, 'e2'), 'w')
-      assert.equal(fenPieceColorAt(STARTING_FEN, 'e7'), 'b')
-      assert.equal(fenPieceColorAt(STARTING_FEN, 'e4'), null)
-      assert.equal(fenPieceColorAt(STARTING_FEN, 'z9'), null)
-      assert.equal(fenPieceColorAt('not a fen', 'e2'), null)
     })
 
     it('recovers the double-step that created an en-passant target', () => {
@@ -959,6 +1018,19 @@ ${MATE_IN_1_ROW}`
       assert.equal(puzzleMatchesFilters(puzzle, { minRating: 1500, maxRating: 2000 }), true)
       assert.equal(puzzleMatchesFilters(puzzle, { themes: ['pin'] }), false)
       assert.equal(puzzleMatchesFilters(puzzle, { themes: ['fork'] }), true)
+      assert.equal(puzzleMatchesFilters(puzzle, { themes: ['fork', 'middlegame'] }), true)
+      assert.equal(puzzleMatchesFilters(puzzle, { themes: ['fork', 'mateIn1'] }), false)
+    })
+
+    it('ranks recommended theme badges by co-occurrence in the filtered set', () => {
+      assert.deepEqual(
+        rankCommonPuzzleThemes({ pin: 3, fork: 10, mateIn1: 5, skewer: 0 }, { exclude: ['fork'] }),
+        ['mateIn1', 'pin'],
+      )
+      assert.ok(rankCommonPuzzleThemes(null).includes('fork'))
+      assert.deepEqual(rankCommonPuzzleThemes(null, { exclude: ['fork'] })[0], PUZZLE_COMMON_THEME_IDS.find(id => id !== 'fork'))
+      assert.equal(rankCommonPuzzleThemes({ pin: 2 }, { exclude: ['pin'] }).includes('pin'), false)
+      assert.deepEqual(rankCommonPuzzleThemes({ pin: 2, skewer: 0 }), ['pin'])
     })
 
     it('normalizes restored sessions where puzzle item text was stored as PGN', () => {
@@ -1134,6 +1206,30 @@ ${MATE_IN_1_ROW}`
 1. e4 e5`
       assert.equal(classifyChessSave(inProgress, finished), 'complete')
       assert.equal(chessJournalSymbol(inProgress, finished), CHESS_COMPLETE_SYMBOL)
+    })
+
+    it('uses the checkered flag when Result and trailing score land in one save', () => {
+      // Resign / natural endings often append "1-0" to movetext while stamping Result.
+      const inProgress = `${bothSeated}[Result "*"]
+
+1. e4 e5 2. Nf3`
+      const resigned = `${bothSeated}[Result "1-0"]
+[Termination "normal"]
+
+1. e4 e5 2. Nf3 1-0`
+      assert.equal(classifyChessSave(inProgress, resigned), 'complete')
+      assert.equal(chessJournalSymbol(inProgress, resigned), CHESS_COMPLETE_SYMBOL)
+    })
+
+    it('uses the checkered flag when a mating move and Result arrive together', () => {
+      const beforeMate = `${bothSeated}[Result "*"]
+
+1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6`
+      const mated = `${bothSeated}[Result "1-0"]
+
+1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7# 1-0`
+      assert.equal(classifyChessSave(beforeMate, mated), 'complete')
+      assert.equal(chessJournalSymbol(beforeMate, mated), CHESS_COMPLETE_SYMBOL)
     })
 
     it('builds a two-step ghost journal for an open challenge', () => {
@@ -1711,16 +1807,6 @@ ${movetext}`.trim()
       })
       assert.equal(fields.isChallengePost, true)
       assert.equal(fields.showHumanPlayWrap, false)
-    })
-
-    it('treats legacy remote play-mode alias as correspondence', () => {
-      const fields = positionStartModalFields({
-        opponent: 'human',
-        humanPlayMode: 'remote',
-      })
-      assert.equal(fields.isChallengePost, true)
-      assert.equal(fields.isRemote, true)
-      assert.equal(fields.showHumanPlayWrap, true)
     })
 
     it('keeps challenge-post mode blocked for unparseable wiki input', () => {

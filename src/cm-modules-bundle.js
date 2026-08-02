@@ -11,6 +11,7 @@ import { LocalPlayer } from 'chess-console/src/players/LocalPlayer.js'
 import { COLOR } from 'cm-chess/src/Chess.js'
 import { PIECES } from 'cm-chess/src/Chess.js'
 import { COLOR as BOARD_COLOR } from 'cm-chessboard/src/Chessboard.js'
+import { ChessboardView } from 'cm-chessboard/src/view/ChessboardView.js'
 import { Observe } from 'cm-web-modules/src/observe/Observe.js'
 import { DomUtils } from 'cm-web-modules/src/utils/DomUtils.js'
 import { html } from 'chess-console/src/utils/html.js'
@@ -21,7 +22,6 @@ import { ENGINE_STATE } from 'cm-engine-runner/src/EngineRunner.js'
 import { StockfishRunner, LEVELS } from 'cm-engine-runner/src/StockfishRunner.js'
 import {
   fenBeforeEnPassantDoubleStep,
-  fenPieceColorAt,
   lastMoveFromEnPassantTarget,
   stockfishLevelElo,
 } from './chess-core.js'
@@ -30,8 +30,6 @@ import 'bootstrap-show-modal/src/ShowModal.js'
 // # Staunty Figures
 
 const PIECE_TYPES = ['K', 'Q', 'R', 'B', 'N', 'P']
-// Legacy wrapper id — removed on clear so old dual-cache sessions do not keep stale #wk ids.
-const WIKI_SPRITE_WRAPPER_ID = 'wiki-staunty-sprite'
 // Shared with cm-chessboard `assetsCache` so board + history resolve the same in-document sprite.
 const BOARD_SPRITE_WRAPPER_ID = 'cm-chessboard-sprite'
 
@@ -41,7 +39,6 @@ let cachedSpriteUrl = null
 export function clearPieceSpriteCache() {
   cachePromise = null
   cachedSpriteUrl = null
-  document.getElementById(WIKI_SPRITE_WRAPPER_ID)?.remove()
   document.getElementById(BOARD_SPRITE_WRAPPER_ID)?.remove()
 }
 
@@ -62,11 +59,24 @@ function waitForSpriteWrapper(wrapperId) {
   })
 }
 
+// Without a service worker, sprite fetch is async. cm-chessboard draws `<use href="#wk">`
+// immediately — if the sprite wrapper is still empty, the board stays blank until redraw.
+function redrawChessboardViewPieces(view) {
+  try {
+    view?.redrawPieces?.()
+  } catch {
+    /* board may already be destroyed */
+  }
+}
+
 // Ensure piece sprites are inlined once under `#cm-chessboard-sprite`.
 // Chrome (incl. Android) often drops `fill="url(#…)"` paints when `<use>` points at an
 // external SVG file — Merida white K/Q then render as solid dark silhouettes. In-document
 // `#wk` refs keep gradients/filters working. Paint-server ids in each set file are
 // prefixed (`merida-wk-a`, `shapes-wk-a`, …) so sets cannot collide on `#wk-a`.
+// Prefer `style="fill:…"` (or paint-server urls) over presentation `fill="…"` / shared CSS
+// classes — Chrome `<use href="#wk">` inherits host fill and overrides presentation attrs
+// and colliding class rules (Kosal wk/wq went solid black that way).
 export function ensurePieceSpriteCached(spriteUrl = './assets/pieces/merida.svg') {
   if (cachePromise && cachedSpriteUrl === spriteUrl && spriteWrapperHasSvg(BOARD_SPRITE_WRAPPER_ID)) {
     return cachePromise
@@ -110,6 +120,21 @@ export function ensurePieceSpriteCached(spriteUrl = './assets/pieces/merida.svg'
   })
 
   return cachePromise
+}
+
+// cm-chessboard's cacheSpriteToDiv fires XHR without waiting and skips entirely when the
+// wrapper already exists (e.g. survey prefetch). Redraw pieces once the SVG is present so
+// cold loads without a SW do not leave a blank board.
+const _cacheSpriteToDiv = ChessboardView.prototype.cacheSpriteToDiv
+ChessboardView.prototype.cacheSpriteToDiv = function cacheSpriteToDivThenRedraw(wrapperId, url) {
+  const existing = document.getElementById(wrapperId)
+  if (existing) {
+    if (spriteWrapperHasSvg(wrapperId)) return
+    waitForSpriteWrapper(wrapperId).then(() => redrawChessboardViewPieces(this))
+    return
+  }
+  _cacheSpriteToDiv.call(this, wrapperId, url)
+  waitForSpriteWrapper(wrapperId).then(() => redrawChessboardViewPieces(this))
 }
 
 export function stauntySpriteId(colorChar, pieceLetter) {
@@ -283,18 +308,33 @@ export class WikiHistory {
         </table>
       `
 
-      if (this.chessConsole.state.plyViewed > 0) {
-        const plyElement = this.element.querySelector('.ply' + this.chessConsole.state.plyViewed)
-        const scrollEl = this.element.closest('.wiki-chess-history-scroll') || this.element
-        if (plyElement) {
-          scrollEl.scrollTop = 0
-          let top = 0
-          let node = plyElement
-          while (node && node !== scrollEl) {
-            top += node.offsetTop
-            node = node.offsetParent
+      // Keep the viewed ply in view inside `.wiki-chess-history-scroll`.
+      // Use getBoundingClientRect vs the scroll box (not offsetParent walks — the
+      // container is often unpositioned). Avoid element.scrollIntoView so the wiki
+      // page / iframe itself does not jump.
+      // ply 0 = start position (no active cell) — scroll to the top so opening
+      // moves are visible instead of leaving the list parked at the end.
+      const plyViewed = this.chessConsole.state.plyViewed
+      const scrollEl = this.element.closest('.wiki-chess-history-scroll')
+      if (scrollEl && plyViewed <= 0) {
+        scrollEl.scrollTop = 0
+      } else if (plyViewed > 0) {
+        const plyElement = this.element.querySelector('.ply' + plyViewed)
+        const plyScrollEl = plyElement?.closest('.wiki-chess-history-scroll') || scrollEl
+        if (plyElement && plyScrollEl) {
+          const elRect = plyElement.getBoundingClientRect()
+          const scRect = plyScrollEl.getBoundingClientRect()
+          const padTop = parseFloat(getComputedStyle(plyScrollEl).paddingTop) || 0
+          const padBottom = parseFloat(getComputedStyle(plyScrollEl).paddingBottom) || 0
+          // Keep a little slack so the active ring isn’t flush against the clip edge.
+          const slack = 4
+          const topLimit = scRect.top + padTop + slack
+          const bottomLimit = scRect.bottom - padBottom - slack
+          if (elRect.top < topLimit) {
+            plyScrollEl.scrollTop -= topLimit - elRect.top
+          } else if (elRect.bottom > bottomLimit) {
+            plyScrollEl.scrollTop += elRect.bottom - bottomLimit
           }
-          scrollEl.scrollTop = Math.max(0, top - 68)
         }
       }
     })
@@ -312,21 +352,22 @@ function stauntyPieceMarkup(spriteUrl, pieceCaptured, colorChar, ply, size, coun
   return `<span class="piece wiki-captured-piece" role="button" data-ply="${ply}">${pieceHtml}${badge}</span>`
 }
 
-// Collapse a list of captures ({piece, ply}) into one entry per piece type, keeping
-// first-capture order and the LAST ply of each type (so clicking a stack jumps to the
-// most recent capture of that piece). Keeps the strip bounded: at most 5 tiles per row.
-function groupCaptures(captures) {
-  const groups = new Map()
-  for (const { piece, ply } of captures) {
-    const group = groups.get(piece)
-    if (group) {
-      group.count += 1
-      group.ply = ply
-    } else {
-      groups.set(piece, { piece, ply, count: 1 })
-    }
+// Lowest material value → highest. Knight before bishop at equal value (3).
+const CAPTURE_DISPLAY_ORDER = ['P', 'N', 'B', 'R', 'Q']
+
+function emptyCapturedSlot() {
+  return '<span class="wiki-captured-piece wiki-captured-piece-empty" aria-hidden="true"></span>'
+}
+
+// One entry per piece type; last ply wins for click-to-jump.
+function bumpCaptureGroup(map, piece, ply) {
+  const group = map.get(piece)
+  if (group) {
+    group.count += 1
+    group.ply = ply
+  } else {
+    map.set(piece, { piece, ply, count: 1 })
   }
-  return [...groups.values()]
 }
 
 export class WikiCapturedPieces extends CapturedPieces {
@@ -349,19 +390,31 @@ export class WikiCapturedPieces extends CapturedPieces {
     }
   }
 
-  renderPieces(capturedPieces, capturedPiecesAfterPlyViewed, points) {
-    // Points total first (a fixed-width column on the left), then the pieces inside
-    // .wiki-captured-board — styled as one rank of a real board in dark mode, where
-    // the two color rows abut to read as a single board slice.
+  // Points column, then slots in CAPTURE_DISPLAY_ORDER. `types` is shared by white and
+  // black so matching piece types share a column; missing types get an empty spacer.
+  renderAlignedRow(groups, colorChar, types, points) {
     let output = '<div class="wiki-captured-row">'
     if (points > 0) {
-      output += `<small class="wiki-captured-points">${points}</small>`
+      output += `<small class="wiki-captured-points" title="Material points">${points}</small>`
+    } else if (types.length > 0) {
+      output += '<small class="wiki-captured-points wiki-captured-points-empty" aria-hidden="true"></small>'
     }
-    if (capturedPieces.length > 0 || capturedPiecesAfterPlyViewed.length > 0) {
+    if (types.length > 0) {
       output += '<span class="wiki-captured-board">'
-      output += capturedPieces.join('')
-      if (capturedPiecesAfterPlyViewed.length > 0) {
-        output += `<span class="text-muted">${capturedPiecesAfterPlyViewed.join('')}</span>`
+      for (const piece of types) {
+        const group = groups.get(piece)
+        if (!group) {
+          output += emptyCapturedSlot()
+          continue
+        }
+        output += stauntyPieceMarkup(
+          this.spriteUrl,
+          piece,
+          colorChar,
+          group.ply,
+          this.pieceSize,
+          group.count,
+        )
       }
       output += '</span>'
     }
@@ -372,49 +425,34 @@ export class WikiCapturedPieces extends CapturedPieces {
   redraw() {
     window.clearTimeout(this.redrawDebounce)
     this.redrawDebounce = setTimeout(() => {
-      const capturesWhite = []
-      const capturesWhiteAfterPlyViewed = []
-      const capturesBlack = []
-      const capturesBlackAfterPlyViewed = []
-
+      const groupsWhite = new Map()
+      const groupsBlack = new Map()
       const history = this.chessConsole.state.chess.history({ verbose: true })
+      // plyViewed is 1-based (fenOfPly uses history[ply-1]); only count captures that
+      // have already happened at the viewed position — never "future" muted leftovers,
+      // which used to re-split stacks and break sort/align while scrubbing history.
+      const plyViewed = this.chessConsole.state.plyViewed
       let pointsWhite = 0
       let pointsBlack = 0
       history.forEach((move, index) => {
-        if (move.flags.indexOf('c') !== -1 || move.flags.indexOf('e') !== -1) {
-          const pieceCaptured = move.captured.toUpperCase()
-          const capture = { piece: pieceCaptured, ply: move.ply }
-          if (move.color === 'b') {
-            if (index < this.chessConsole.state.plyViewed) {
-              capturesWhite.push(capture)
-            } else {
-              capturesWhiteAfterPlyViewed.push(capture)
-            }
-            pointsWhite += PIECES[pieceCaptured.toLowerCase()].value
-          } else if (move.color === 'w') {
-            if (index < this.chessConsole.state.plyViewed) {
-              capturesBlack.push(capture)
-            } else {
-              capturesBlackAfterPlyViewed.push(capture)
-            }
-            pointsBlack += PIECES[pieceCaptured.toLowerCase()].value
-          }
+        if (index >= plyViewed) return
+        if (move.flags.indexOf('c') === -1 && move.flags.indexOf('e') === -1) return
+        const piece = move.captured.toUpperCase()
+        const value = PIECES[piece.toLowerCase()]?.value || 0
+        if (move.color === 'b') {
+          bumpCaptureGroup(groupsWhite, piece, move.ply)
+          pointsWhite += value
+        } else if (move.color === 'w') {
+          bumpCaptureGroup(groupsBlack, piece, move.ply)
+          pointsBlack += value
         }
       })
-      const renderGrouped = (captures, colorChar) =>
-        groupCaptures(captures).map(({ piece, ply, count }) =>
-          stauntyPieceMarkup(this.spriteUrl, piece, colorChar, ply, this.pieceSize, count),
-        )
-      const outputWhite = this.renderPieces(
-        renderGrouped(capturesWhite, 'w'),
-        renderGrouped(capturesWhiteAfterPlyViewed, 'w'),
-        pointsWhite,
+      // Shared column set: every type either side has taken so far, low→high value.
+      const types = CAPTURE_DISPLAY_ORDER.filter(
+        piece => groupsWhite.has(piece) || groupsBlack.has(piece),
       )
-      const outputBlack = this.renderPieces(
-        renderGrouped(capturesBlack, 'b'),
-        renderGrouped(capturesBlackAfterPlyViewed, 'b'),
-        pointsBlack,
-      )
+      const outputWhite = this.renderAlignedRow(groupsWhite, 'w', types, pointsWhite)
+      const outputBlack = this.renderAlignedRow(groupsBlack, 'b', types, pointsBlack)
       const rows = this.chessConsole.state.orientation === 'w' ? outputWhite + outputBlack : outputBlack + outputWhite
       this.element.innerHTML = `<h3 class="wiki-captured-heading">${this.i18n.t('captured_pieces')}</h3>` + rows
       // The game panel's collapsed "captured pieces" summary mirrors captures
@@ -927,28 +965,8 @@ function patchGameControl(GameControl) {
   }
 }
 
-// Upstream quirk: cm-chessboard leaves a piece *selected* after it is dragged back to
-// its origin square (drag-back becomes click-to-move, not a cancel). The next pointer-down
-// on another own piece is then probed as a move first (a chess960-castling accommodation),
-// and LocalPlayer answers the failed probe with moveResponse({from, to}) — ChessConsole
-// publishes `illegalMove` and the wrong-move sound + red flash fire on a plain re-selection.
-// Swallow the callback when the "illegal move" lands on the mover's own piece: that gesture
-// is always a re-selection (chess960 king-onto-rook castling is legal, so it never gets here).
-// cm-chessboard still cancels the old input and starts fresh on the newly clicked piece.
-function patchLocalPlayerReselect(LocalPlayer) {
-  const orig = LocalPlayer.prototype.validateMoveAndPromote
-  LocalPlayer.prototype.validateMoveAndPromote = function (fen, squareFrom, squareTo, callback) {
-    const sideToMove = String(fen || '').split(/\s+/)[1]
-    return orig.call(this, fen, squareFrom, squareTo, moveResult => {
-      if (!moveResult && fenPieceColorAt(fen, squareTo) === sideToMove) return
-      callback(moveResult)
-    })
-  }
-}
-
 patchHistoryControl(HistoryControl)
 patchGameControl(GameControl)
-patchLocalPlayerReselect(LocalPlayer)
 
 export { ChessConsole } from 'chess-console/src/ChessConsole.js'
 export { ChessConsolePlayer } from 'chess-console/src/ChessConsolePlayer.js'

@@ -37,6 +37,28 @@ node scripts/dev-tools.js pwa-icons
 
 To wipe built client artifacts before a full rebuild, remove the outputs listed in `build-client.js` (or delete `client/chess*.js`, `client/cm-modules-bundle.js*`, `client/glicko-worker.js*`, copied Stockfish assets, and `client/assets/styles/cm-modules.css*`), then `npm run build`.
 
+### Full local exercise (rated games + federation + bad actors)
+
+Wipe any prior league-seed farm data, then write a multi-island Stockfish season that stresses Island Cups, the global Open, bridge friendlies, sparse edges, hop-trust weeding, and distrust/mute targets. Run from the plugin repo root (wiki server on `:3001`):
+
+```bash
+node scripts/dev-tools.js league seed \
+  --reset \
+  --players=36 \
+  --rounds=6 \
+  --games-per-round=3 \
+  --islands=3 \
+  --bridges=2 \
+  --global-share=0.55 \
+  --sparse-islands=1 \
+  --sparse-factor=0.4 \
+  --bad-actors=3 \
+  --seed=42 \
+  --port=3001
+```
+
+After it finishes, open Olga’s (or Rob’s) **My Chess Games** / **Chess Leaderboards** on the local farm and exercise rated lists, open challenges, neighbourhood hop-trust, and trusted-peer distrust of the bad actors. Same flags with `--dry-run` prints the plan without writing; add `--no-engine` only when you want a fast structural smoke (unrealistic moves/results).
+
 ## Flags
 
 ### `league seed`
@@ -59,3 +81,9 @@ Writes a rated demo season to `~/.wiki` (Stockfish by default).
 | `--wiki-root=PATH`    | `~/.wiki`            | Wiki farm data root.                                                                                  |
 | `--engines=N`         | CPU count − 2 (1–16) | Parallel Stockfish workers.                                                                           |
 | `--engine-ms=N`       | `24`                 | Per-move think time in ms (min 5).                                                                    |
+| `--no-engine`         | off                  | Skip Stockfish — random-legal movetext + sampled results (fast, unrealistic).                         |
+| `--draw-rate=N`       | `0.18`               | Draw chance for even skills when using `--no-engine`.                                                 |
+| `--reset`             | off                  | Wipe prior league-seed sites/pages under `--wiki-root` before writing this season.                    |
+| `--no-auto-reset`     | off                  | Keep old sim sites even when the roster changed (default auto-resets on roster change).               |
+| `--dry-run`           | off                  | Plan/simulate only — no wiki files written. With `--reset`, only the wipe is simulated.               |
+| `--no-live`           | off                  | Quiet log (disable the alt-screen live dashboard).                                                    |

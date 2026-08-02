@@ -648,6 +648,8 @@ async function dispatchPwaBridgeMessage(msg, bridgeCtx, env) {
     case MSG.BUILD_CHALLENGES: {
       const site = createPwaBridgeSiteClient(pagehandler, localSite, argv)
       const neighborhoodSites = await discoverFarmNeighborhoodSites(argv, localSite)
+      // Farm peers come from the browser via wiki-plugin-present (`/plugin/present/roll`).
+      const farmPeerSites = Array.isArray(msg.farmPeerSites) ? msg.farmPeerSites : []
       const seedSlug = slug && slug !== 'standalone' ? slug : undefined
       const idbOpts = federationIndexedDbOptsFromPayload(msg)
       const localOpenChallenges = Array.isArray(msg.localOpenChallenges)
@@ -659,6 +661,7 @@ async function dispatchPwaBridgeMessage(msg, bridgeCtx, env) {
         localOpenChallenges,
         slug: seedSlug,
         neighborhoodSites,
+        farmPeerSites,
         blockList: idbOpts.blockList,
         knownOpponents: idbOpts.knownOpponents,
         knownFederationSites: idbOpts.knownFederationSites,
@@ -798,7 +801,7 @@ async function dispatchPwaBridgeMessage(msg, bridgeCtx, env) {
       const ghost = msg.ghost && typeof msg.ghost === 'object' ? msg.ghost : null
       const challenge = normalizeChallengeState(msg.challenge)
       const ghostItemId = String(msg.ghostItemId || ghost?.itemId || '').trim()
-      // Pending seeks stay on My Chess Games survey metadata until accepted.
+      // Pending seeks stay on My Chess Games page.chess.openChallenges until accepted.
       let page = await loadLocalPage(pagehandler, SURVEY_PAGE_SLUG)
       let isNew = false
       if (!page) {
@@ -895,25 +898,11 @@ export function createPwaBridgeRouter(params) {
   const persistHandlers = { sitemaphandler, searchhandler }
   const router = createPathRouter()
 
-  const cors = (req, res, next) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*')
-    res.header('Access-Control-Allow-Credentials', 'true')
-    res.header('Access-Control-Allow-Headers', 'Content-Type')
-    next()
-  }
+  // Same-origin only: DirectTab + installed PWA call relative PWA_BRIDGE_BASE.
+  // Do not emit credentialed CORS (reflective Origin + Allow-Credentials invited
+  // cross-site cookie use). Browsers already allow same-origin fetch with cookies.
 
-  router.add('OPTIONS', '/session', cors)
-  router.add('OPTIONS', '/challenges', cors)
-  router.add('OPTIONS', '/site-survey', cors)
-  router.add('OPTIONS', '/leaderboard', cors)
-  router.add('OPTIONS', '/survey-status', cors)
-  router.add('OPTIONS', '/game-state', cors)
-  router.add('OPTIONS', '/save-game', cors)
-  router.add('OPTIONS', '/join-challenge', cors)
-  router.add('OPTIONS', '/create-game', cors)
-  router.add('OPTIONS', '/dispatch', cors)
-
-  router.add('POST', '/dispatch', cors, async (req, res) => {
+  router.add('POST', '/dispatch', async (req, res) => {
     try {
       const body = req.body && typeof req.body === 'object' ? req.body : await readJsonBody(req)
       const msg = body.msg
@@ -938,11 +927,11 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('GET', '/session', cors, (req, res) => {
+  router.add('GET', '/session', (req, res) => {
     res.json(sessionPayload(req, securityhandler, requestHost(req, argv), argv))
   })
 
-  router.add('GET', '/challenges', cors, async (req, res) => {
+  router.add('GET', '/challenges', async (req, res) => {
     try {
       const localSite = requestHost(req, argv)
       const site = createPwaBridgeSiteClient(pagehandler, localSite, argv)
@@ -959,7 +948,7 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('GET', '/site-survey', cors, async (req, res) => {
+  router.add('GET', '/site-survey', async (req, res) => {
     try {
       const localSite = requestHost(req, argv)
       const site = createPwaBridgeSiteClient(pagehandler, localSite, argv)
@@ -980,15 +969,15 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('GET', '/leaderboard', cors, async (req, res) => {
+  router.add('GET', '/leaderboard', async (req, res) => {
     await handleLeaderboardRequest(req, res, argv, pagehandler)
   })
 
-  router.add('POST', '/leaderboard', cors, async (req, res) => {
+  router.add('POST', '/leaderboard', async (req, res) => {
     await handleLeaderboardRequest(req, res, argv, pagehandler)
   })
 
-  router.add('GET', '/survey-status', cors, async (req, res) => {
+  router.add('GET', '/survey-status', async (req, res) => {
     try {
       const localSite = requestHost(req, argv)
       const site = createPwaBridgeSiteClient(pagehandler, localSite, argv)
@@ -1007,7 +996,7 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('GET', '/game-state', cors, async (req, res) => {
+  router.add('GET', '/game-state', async (req, res) => {
     try {
       const localSite = requestHost(req, argv)
       const slug = String(req.query?.slug || req.query?.pageKey || '').trim()
@@ -1036,7 +1025,7 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('PUT', '/save-game', cors, async (req, res) => {
+  router.add('PUT', '/save-game', async (req, res) => {
     if (!requireOwner(req, res, securityhandler)) return
     try {
       const body = req.body && typeof req.body === 'object' ? req.body : await readJsonBody(req)
@@ -1051,7 +1040,7 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('POST', '/create-game', cors, async (req, res) => {
+  router.add('POST', '/create-game', async (req, res) => {
     if (!requireOwner(req, res, securityhandler)) return
     try {
       const localSite = requestHost(req, argv)
@@ -1087,14 +1076,14 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('POST', '/join-challenge', cors, async (req, res) => {
+  router.add('POST', '/join-challenge', async (req, res) => {
     if (!requireOwner(req, res, securityhandler)) return
     try {
       const localSite = requestHost(req, argv)
       const body = req.body && typeof req.body === 'object' ? req.body : await readJsonBody(req)
       const ghostPgn = String(body.pgn || '').trim()
       const challenge = body.challenge
-      const creatorSite = String(body.host || '')
+      const creatorSite = String(body.site || '')
         .trim()
         .toLowerCase()
       const ghostItemId = String(body.itemId || '').trim()
@@ -1142,7 +1131,7 @@ export function createPwaBridgeRouter(params) {
     }
   })
 
-  router.add('GET', '/lookup-host-display', cors, async (req, res) => {
+  router.add('GET', '/lookup-host-display', async (req, res) => {
     try {
       const host = String(req.query?.host || '').trim()
       if (!host) {

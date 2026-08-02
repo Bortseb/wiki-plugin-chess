@@ -81,6 +81,16 @@ describe('guards · architecture', () => {
     execSync('node --check client/service-worker.js', { cwd: root, stdio: 'pipe' })
   })
 
+  it('service-worker keeps parent wiki-client pack contracts', () => {
+    const sw = readFileSync(join(root, 'client/service-worker.js'), 'utf8')
+    // wiki-client parsePluginServiceWorker + matchCached / flush rely on these.
+    assert.match(sw, /const CACHE_NAME = 'wiki-chess-pwa-cache-/)
+    assert.match(sw, /const PARENT_CACHE_PREFIX = 'fedwiki-pwa-'/)
+    assert.match(sw, /const assetsToCache = \[/)
+    assert.match(sw, /\/plugin\/chess\/pwa/)
+    assert.match(sw, /isPwaBridgeRequest/)
+  })
+
   it('board-layout defines PWA protocol helpers and index.html boots early', () => {
     const layout = readFileSync(join(root, 'src/board-layout.js'), 'utf8')
     const index = readFileSync(join(root, 'client/index.html'), 'utf8')
@@ -143,11 +153,13 @@ describe('guards · architecture', () => {
     assert.ok(files.includes('server/server.js'), 'npm pack must include server/server.js')
   })
 
-  it('installed PWA awaits /session before boot so auth is not wiped by initializeChess', () => {
+  it('shell-less surfaces use the HTTP bridge and await /session before boot', () => {
     const src = readFileSync(join(root, 'src/chess-app.js'), 'utf8')
+    assert.match(src, /let pwaBridgeActive = !wikiFrame/)
     assert.match(src, /await (?:BoardLayout\.)?fetchPwaSession\(\)/)
+    assert.match(src, /await refreshPwaSessionFromBridge\(\)/)
     assert.match(src, /Boot \/ local-session restore often omit auth flags[\s\S]*viewerAuthenticated/)
-    assert.match(src, /Popup \/ direct tab: auth arrives via shell SET_STATE/)
+    assert.match(src, /Popup \(and any future shell-backed surface\): auth via SET_STATE/)
   })
 
   it('survey.js keys hosts with normalizeWikiSite', () => {
@@ -165,6 +177,45 @@ describe('guards · architecture', () => {
   it('chess.js does not import realtime.js (app-layer module)', () => {
     const src = readFileSync(join(root, 'src/chess.js'), 'utf8')
     assert.doesNotMatch(src, /from ['"]\.\/realtime\.js['"]/)
+  })
+
+  // Inlined sprites (#cm-chessboard-sprite) hoist <style> into the document. Shared class
+  // names with different fills (Kosal .st1 white vs black) make seat kings / board whites
+  // paint as black. Pack pieces with unique class names or style="fill:…" (not fill="…").
+  it('piece sprite sheets do not reuse CSS class names with conflicting fills', () => {
+    const piecesDir = join(root, 'client/assets/pieces')
+    const files = readdirSync(piecesDir).filter(f => f.endsWith('.svg'))
+    assert.ok(files.length >= 9, 'expected packed piece sets under client/assets/pieces')
+    for (const file of files) {
+      const markup = readFileSync(join(piecesDir, file), 'utf8')
+      const styles = [...markup.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map(m => m[1])
+      const fillByClass = new Map()
+      for (const css of styles) {
+        for (const rule of css.matchAll(/\.([A-Za-z_][\w-]*)\s*\{([^}]*)\}/g)) {
+          const fill = (rule[2].match(/fill\s*:\s*([^;]+)/) || [])[1]
+          if (!fill) continue
+          const cls = rule[1]
+          if (!fillByClass.has(cls)) fillByClass.set(cls, new Set())
+          fillByClass.get(cls).add(fill.trim())
+        }
+      }
+      for (const [cls, fills] of fillByClass) {
+        assert.equal(
+          fills.size,
+          1,
+          `${file}: class .${cls} has conflicting fills ${[...fills].join(', ')}`,
+        )
+      }
+    }
+  })
+
+  // Chrome <use href="#wk"> inherits host fill and overrides presentation fill="…".
+  // Kosal whites that still used fill="#fff" rendered as solid black (wk/wq).
+  it('kosal sprite uses style fills, not presentation fill attributes', () => {
+    const kosal = readFileSync(join(root, 'client/assets/pieces/kosal.svg'), 'utf8')
+    const markup = kosal.replace(/<!--[\s\S]*?-->/g, '')
+    assert.doesNotMatch(markup, /\sfill="/)
+    assert.match(markup, /style="fill:#fff"/)
   })
 
   it('chess-core.js owns pure realtime presence helpers', () => {
@@ -308,10 +359,18 @@ describe('guards · architecture', () => {
     assert.doesNotMatch(realtime, /lastAcceptedRemoteMovetext/)
     assert.doesNotMatch(realtime, /function tryAnimateRemoteMove/)
     assert.match(realtime, /function acceptRemoteMove\(\) \{[\s\S]*?remotePageForkInFlight = true/)
-    assert.match(realtime, /forkRemotePage\(\{ host: forkSite, expectText: text \}\)/)
+    assert.match(realtime, /forkRemotePage\(\{ site: forkSite, expectText: text \}\)/)
     const shell = readFileSync(join(root, 'src/chess.js'), 'utf8')
     assert.match(shell, /remoteForkInFlight/)
     assert.match(shell, /remotePageMatchesExpect/)
     assert.match(shell, /expectText/)
+  })
+
+  it('page-fork commit assigns mergeItemTextIntoChessObj so SET_STATE carries the new PGN', () => {
+    const shell = readFileSync(join(root, 'src/chess.js'), 'utf8')
+    assert.match(
+      shell,
+      /const commitLocalAfterPut = \(\) => \{[\s\S]*?ctx\.chessObj = mergeItemTextIntoChessObj\(ctx\.chessObj, nextItem\.text\)/,
+    )
   })
 })

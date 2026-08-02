@@ -85,6 +85,7 @@ import {
 import {
   isReplaceableGhostPageTitle,
   buildJoinChallengePage,
+  challengeJoinGate,
   SURVEY_PAGE_SLUG,
   SURVEY_PAGE_TITLE,
   SURVEY_PAGE_STORY,
@@ -228,6 +229,15 @@ Game.initGame({
   returnToSurveyItemView,
   isCreatePreviewContext,
   canSpawnLineupGhostPage,
+  createGameGhostPage(onFailure) {
+    requestExternalCreatePreview('game', { onFailure })
+  },
+  createChooseMenuGhostPage(onFailure) {
+    requestExternalCreatePreview('choose', { onFailure })
+  },
+  startChessItemFromChooseMenu,
+  flushGameBeforeBrowse,
+  canPublish: () => Boolean(chessState()?.ownerCanJournalHere || chessState()?.pageOnThisWiki),
   syncLinkedPageTitleInputs,
   shouldShowStartModalPageTitleField,
   enableGuestLocalStoragePersistForPlay,
@@ -308,6 +318,9 @@ function buildSurveyUiApp() {
     startOpenChallengeSetup,
     createChooseMenuGhostPage(onFailure) {
       requestExternalCreatePreview('choose', { onFailure })
+    },
+    createGameGhostPage(onFailure) {
+      requestExternalCreatePreview('game', { onFailure })
     },
     viewingSite: () => viewingSite(),
     viewerSeatId: () => String(chessState()?.viewerSeatId || '').trim(),
@@ -609,6 +622,10 @@ ChooseMenu.initStartMenu({
   },
   canPublish: () => Boolean(chessState()?.ownerCanJournalHere || chessState()?.pageOnThisWiki),
   pwaAuthGateTitle,
+  canSpawnLineupGhostPage,
+  createChooseMenuGhostPage(onFailure) {
+    requestExternalCreatePreview('choose', { onFailure })
+  },
   get newGameSetupActive() {
     return isNewGameSetupActive()
   },
@@ -786,8 +803,7 @@ function pieceSetSummaryPreviewHtml(set, { size = 20, nameFirst = false } = {}) 
 
 // Seat-row king icon. Prefer in-document `#wk` / `#bk` (same sprite the board cached) so
 // Chrome does not drop Merida’s gradient fills on external `<use href="….svg#wk">`.
-// Render the full 40×40 sprite cell like a board square — the cell already centers the
-// king ink vertically, so flex-centering the cell centers the king (no crop/nudge).
+// Sprite fills must use `style="fill:…"` (not presentation `fill="…"`) — see kosal.svg.
 function seatKingPreviewHtml(colorChar, size = 20) {
   const color = colorChar === 'b' ? 'b' : 'w'
   const pieceId = stauntySpriteId(color, 'K')
@@ -1101,10 +1117,18 @@ async function startPwaOpenChallengeJoinPreview(msg) {
   }
 
   const isAuthenticatedOwner = Boolean(session.isOwner && session.isAuthenticated)
+  const joinerSite = viewingSite()
+  if (
+    !challengeJoinGate(challenge, {
+      isAuthenticatedOwner,
+      viewingSite: joinerSite,
+    }).ok
+  ) {
+    return
+  }
   const joinerDisplayName = isAuthenticatedOwner
     ? resolvedViewerOwnerName() || session.signedInDisplayName || session.ownerName || ''
     : guestPlayerName()
-  const joinerSite = viewingSite()
   let payload
   try {
     payload = buildJoinChallengePage({
@@ -1193,7 +1217,7 @@ async function runPwaChallengeJoinMaterialize(title) {
         body: {
           pgn: ctx.ghostPgn,
           challenge: ctx.challenge,
-          host: ctx.creatorSite,
+          site: ctx.creatorSite,
           itemId: ctx.surveyItemId,
           title: pageTitle,
           joinerDisplayName: resolvedViewerOwnerName(),
@@ -1332,7 +1356,7 @@ function persistLocalSession() {
 }
 
 function flushGameBeforeBrowse() {
-  if (!pwaBridgeActive) return
+  if (!pwaBridgeActive && !isWikiPopup) return
   if (Position.isPositionEditorMode()) {
     if (isPwaJournalless()) persistLocalSession()
     else if (canPersistPosition()) {
@@ -1500,13 +1524,16 @@ function handlePwaPageTitleInput(next) {
 
 const isWikiEmbed = window.parent !== window.self
 const isWikiPopup = Boolean(window.opener)
-const isPwaStandalone = BoardLayout.isInstalledPwa()
+// display-mode:standalone also matches inside iframes/popups when Federated Wiki itself is
+// an installed PWA — only the top-level chess window is the chess installed-PWA surface.
+const isPwaStandalone = BoardLayout.isInstalledPwa() && !isWikiEmbed && !isWikiPopup
 // Popup window or installed PWA — share large-board layout logic
 const isPopupLayout = isWikiPopup || isPwaStandalone
 // Parent wiki page or popup opener — receives postMessage traffic
 const wikiFrame = window.opener || (isWikiEmbed ? window.parent : null)
-// Installed PWA wiki bridge — standalone display without wiki parent/opener (see bootInstalledPwa)
-let pwaBridgeActive = isPwaStandalone && !isWikiPopup && !isWikiEmbed
+// HTTP bridge whenever there is no wiki shell (installed PWA + direct /plugins/chess/ tab).
+// Same-origin owner cookie → GET /session; journal/federation go through pwa-bridge.js.
+let pwaBridgeActive = !wikiFrame
 
 BoardLayout.initPwaTransport({
   getWikiFrame: () => wikiFrame,
@@ -1696,10 +1723,8 @@ const PREFERENCE_SETTING_KEYS = [
   'showAnnotationsBelow',
 ]
 
-// Comment banner prefs are easy to pollute: older builds defaulted enableComments
-// on and every settings persist rewrote the whole prefs blob. v2 drops those
-// sticky keys once; afterwards they are only written when the user toggles them.
 const LOCAL_PREFS_VERSION = 2
+// Comment banner prefs are only written when the user toggles them (see saveLocalSettingPrefs).
 const COMMENT_PREF_KEYS = ['enableComments', 'showAnnotationsBelow']
 
 const UI_PREFS_DB_NAME = 'wiki-chess-ui-v1'
@@ -1754,127 +1779,9 @@ async function writeUiPrefsToDb(prefs) {
   })
 }
 
-function migrateLocalStorageIntoUiPrefs(base) {
-  const prefs = { ...defaultUiPrefs(), ...(base && typeof base === 'object' ? base : {}) }
-  let touched = false
-  try {
-    if (typeof localStorage === 'undefined') return { prefs, touched }
-  } catch {
-    return { prefs, touched }
-  }
-
-  const takeJson = key => {
-    try {
-      const raw = localStorage.getItem(key)
-      if (raw == null) return undefined
-      try {
-        return JSON.parse(raw)
-      } catch {
-        return raw
-      }
-    } catch {
-      return undefined
-    }
-  }
-
-  const removeKey = key => {
-    try {
-      if (localStorage.getItem(key) == null) return
-      localStorage.removeItem(key)
-      touched = true
-    } catch {
-      /* private mode */
-    }
-  }
-
-  try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const key = localStorage.key(i)
-      if (!key) continue
-      if (key.startsWith('wiki-chess-prefs:')) {
-        const parsed = takeJson(key)
-        if (parsed && typeof parsed === 'object') {
-          for (const prefKey of PREFERENCE_SETTING_KEYS) {
-            if (typeof parsed[prefKey] === 'boolean' && prefs[prefKey] === undefined) {
-              prefs[prefKey] = parsed[prefKey]
-            }
-          }
-          if (Number(parsed.prefsVersion) > Number(prefs.prefsVersion || 0)) {
-            prefs.prefsVersion = Number(parsed.prefsVersion)
-          }
-        }
-        removeKey(key)
-      } else if (key.startsWith('wiki-chess-pwa-installed:')) {
-        const origin = key.slice('wiki-chess-pwa-installed:'.length)
-        if (origin && localStorage.getItem(key) === 'true') {
-          prefs.pwaInstalledOrigins = { ...(prefs.pwaInstalledOrigins || {}), [origin]: true }
-        }
-        removeKey(key)
-      } else if (key.startsWith('WikiChess-') && key.endsWith('newGameColor')) {
-        const color = takeJson(key)
-        if (typeof color === 'string' && prefs.newGameColor === undefined) prefs.newGameColor = color
-        removeKey(key)
-      }
-    }
-  } catch {
-    /* localStorage iteration can throw */
-  }
-
-  const guestRaw = takeJson('wiki-chess-guest-name')
-  if (typeof guestRaw === 'string' && guestRaw.trim() && prefs.guestName === undefined) {
-    prefs.guestName = guestSeatName(guestRaw)
-  }
-  removeKey('wiki-chess-guest-name')
-
-  const pieceRaw = takeJson('wiki-chess-piece-set')
-  if (typeof pieceRaw === 'string' && prefs.pieceSet === undefined) {
-    prefs.pieceSet = normalizePieceSetId(pieceRaw)
-  }
-  removeKey('wiki-chess-piece-set')
-
-  const themeRaw = takeJson('wiki-chess-color-theme')
-  if (themeRaw != null && prefs.colorTheme === undefined) {
-    prefs.colorTheme = normalizeColorThemeId(themeRaw)
-  }
-  removeKey('wiki-chess-color-theme')
-
-  try {
-    if (localStorage.getItem('wiki-chess-local-puzzle-download') === '1') {
-      if (prefs.localPuzzleDownload === undefined) prefs.localPuzzleDownload = true
-    }
-  } catch {
-    /* ignore */
-  }
-  removeKey('wiki-chess-local-puzzle-download')
-
-  try {
-    if (localStorage.getItem('wiki-chess-learned:challenge-join-fork') === '1') {
-      if (prefs.learnedChallengeJoinFork === undefined) prefs.learnedChallengeJoinFork = true
-    }
-  } catch {
-    /* ignore */
-  }
-  removeKey('wiki-chess-learned:challenge-join-fork')
-
-  try {
-    if (localStorage.getItem('hide-install-nudge') === 'true') {
-      if (prefs.hideInstallNudge === undefined) prefs.hideInstallNudge = true
-    }
-  } catch {
-    /* ignore */
-  }
-  removeKey('hide-install-nudge')
-
-  prefs.prefsVersion = LOCAL_PREFS_VERSION
-  return { prefs, touched }
-}
-
 function normalizeUiPrefsBlob(raw) {
   const prefs = { ...defaultUiPrefs(), ...(raw && typeof raw === 'object' ? raw : {}) }
-  if (Number(prefs.prefsVersion) < LOCAL_PREFS_VERSION) {
-    for (const key of COMMENT_PREF_KEYS) delete prefs[key]
-    prefs.prefsVersion = LOCAL_PREFS_VERSION
-  }
+  prefs.prefsVersion = LOCAL_PREFS_VERSION
   return prefs
 }
 
@@ -1908,9 +1815,8 @@ async function hydrateUiPrefs() {
   } catch {
     fromDb = null
   }
-  const { prefs: migrated, touched } = migrateLocalStorageIntoUiPrefs(fromDb)
-  uiPrefsCache = normalizeUiPrefsBlob(migrated)
-  if (touched || !fromDb || Number(fromDb.prefsVersion) < LOCAL_PREFS_VERSION) {
+  uiPrefsCache = normalizeUiPrefsBlob(fromDb)
+  if (!fromDb || Number(fromDb.prefsVersion) < LOCAL_PREFS_VERSION) {
     persistUiPrefsCache()
   }
   uiPrefsHydrated = true
@@ -2407,7 +2313,7 @@ function wirePwaAuthLock() {
     })
     document.addEventListener('visibilitychange', onVisible)
   } else {
-    // Popup / direct tab: auth arrives via shell SET_STATE / VIEWER_CONTEXT, not /session.
+    // Popup (and any future shell-backed surface): auth via SET_STATE / VIEWER_CONTEXT.
     pwaSessionResolved = true
     pwaSessionReachable = true
     // Mobile reload often paints the padlock before the opener re-adopts the tab —
@@ -2880,11 +2786,18 @@ whenDocumentReady(() => {
       })
       return
     }
-    // Standalone tab
-    void BoardLayout.registerServiceWorker()
-    wirePwaAuthLock()
-    BoardLayout.initInstallNudge()
-    BoardLayout.bootStandalone()
+    // Direct /plugins/chess/ tab — same-origin cookie via /session (like installed PWA).
+    void (async () => {
+      try {
+        void BoardLayout.registerServiceWorker()
+        BoardLayout.initInstallNudge()
+        wirePwaAuthLock()
+        await refreshPwaSessionFromBridge()
+        BoardLayout.bootStandalone()
+      } finally {
+        hideAppLoadingScreen()
+      }
+    })()
   })
 })
 
@@ -3500,10 +3413,11 @@ function resolveGhostPageTitleKey() {
   return null
 }
 
-// Paste onto SURVEY/LEADERBOARD (and similar) may spawn a lineup ghost; popup/PWA
-// and pages that already are create-preview ghosts cannot.
+// Paste onto SURVEY/LEADERBOARD (and similar) may spawn a lineup ghost; popup/PWA,
+// follower embeds, and pages that already are create-preview ghosts cannot.
 function canSpawnLineupGhostPage() {
   if (isCreatePreviewContext()) return false
+  if (sessionFollowsPopup()) return false
   return Boolean(wikiFrame && !isPopupLayout)
 }
 

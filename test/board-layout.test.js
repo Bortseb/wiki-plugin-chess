@@ -298,8 +298,8 @@ describe('app · board-layout', () => {
     const direct = { remoteWatch: () => 'direct' }
     const sent = []
     assert.equal(shellMessengerFromContext({ wiki: direct })?.remoteWatch(), 'direct')
-    shellMessengerFromContext({ postToShell: msg => sent.push(msg) })?.remoteWatch({ host: 'x' })
-    assert.deepEqual(sent[0], { action: MSG.REMOTE_WATCH, host: 'x' })
+    shellMessengerFromContext({ postToShell: msg => sent.push(msg) })?.remoteWatch({ site: 'x' })
+    assert.deepEqual(sent[0], { action: MSG.REMOTE_WATCH, site: 'x' })
     assert.equal(shellMessengerFromContext(null), null)
     assert.equal(shellMessengerFromContext({}), null)
   })

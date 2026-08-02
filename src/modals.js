@@ -864,7 +864,6 @@ export function openEndRealtimeModal({
 export function openChallengeEditModal({
   title = '',
   rated = false,
-  allowGuests = true,
   creatorColor = 'random',
   minRating = null,
   maxRating = null,
@@ -883,7 +882,6 @@ export function openChallengeEditModal({
     closeModalConfirm(() =>
       onSave?.({
         rated: isRated,
-        allowGuests: isRated ? false : allowGuestsCheck.checked,
         creatorColor: colorSelect.value || 'random',
         minRating: minInput.value ?? '',
         maxRating: maxInput.value ?? '',
@@ -961,32 +959,12 @@ export function openChallengeEditModal({
   ratingRow.className = 'wiki-challenge-edit-rating-row'
   ratingRow.append(makeField('Min rating', minInput), makeField('Max rating', maxInput))
 
-  const allowGuestsWrap = document.createElement('label')
-  allowGuestsWrap.className = 'wiki-modal-seek-open-page'
-  const allowGuestsCheck = document.createElement('input')
-  allowGuestsCheck.type = 'checkbox'
-  allowGuestsCheck.checked = !rated && allowGuests !== false
-  allowGuestsWrap.append(allowGuestsCheck, document.createTextNode(' Allow unauthenticated guests to join'))
-  const syncAllowGuestsUi = () => {
-    const isRated = ratedSelect.value === 'rated'
-    allowGuestsCheck.disabled = isRated
-    if (isRated) allowGuestsCheck.checked = false
-  }
-  ratedSelect.addEventListener('change', syncAllowGuestsUi)
-  syncAllowGuestsUi()
-
   const hint = document.createElement('p')
   hint.className = 'wiki-modal-offline'
   hint.textContent =
-    'Leave a rating blank for no limit. Rated challenges are wiki-owners only. Unchecking guests hides the seek from anonymous visitors.'
+    'Leave a rating blank for no limit. Open challenges are for signed-in wiki owners only.'
 
-  body.append(
-    makeField('Game format', ratedSelect),
-    makeField('Your color', colorSelect),
-    ratingRow,
-    allowGuestsWrap,
-    hint,
-  )
+  body.append(makeField('Game format', ratedSelect), makeField('Your color', colorSelect), ratingRow, hint)
 
   const cancelBtn = document.createElement('button')
   cancelBtn.type = 'button'
@@ -1134,10 +1112,24 @@ export function openCommentModal({
   placeholder = 'Write a note about this move…',
   confirmLabel = 'Save comment',
   cancelLabel = 'Cancel',
+  mount,
+  embedded,
+  boardOverlay,
+  onLayoutChange,
   onSubmit,
   onCancel,
 } = {}) {
-  const { body, footer } = createModalShell({ ariaLabel: 'Add a comment', onDismiss: onCancel })
+  // Prefer a board/annotation overlay so the composer stays on-screen near the
+  // comment bar (wiki embed otherwise appends an in-flow dialog at the item bottom).
+  const { root, body, footer } = createModalShell({
+    ariaLabel: 'Add a comment',
+    mount,
+    embedded,
+    boardOverlay,
+    onDismiss: onCancel,
+    onLayoutChange,
+  })
+  if (boardOverlay) root.classList.add('wiki-modal-comment-popover')
 
   const lead = document.createElement('p')
   lead.className = 'wiki-modal-message'
@@ -1193,6 +1185,7 @@ export function openCommentModal({
 
   footer.append(cancelBtn, confirmBtn)
   textarea.focus({ preventScroll: true })
+  onLayoutChange?.()
 }
 
 // # Puzzle and Leaderboard Modals
@@ -1306,23 +1299,38 @@ export function openPuzzleFilterModal({
     return values
   }
 
+  let filterNotifyTimer = 0
+
   const refreshFilterCount = () => {
     if (!onFilterCount || !countEl) return
     const values = readFilterValues()
     const seq = ++countSeq
     countEl.textContent = 'Counting matching puzzles…'
     Promise.resolve(onFilterCount(values))
-      .then(msg => {
-        if (seq === countSeq) countEl.textContent = msg || ''
+      .then(result => {
+        if (seq !== countSeq) return
+        const message = typeof result === 'string' ? result : result?.message
+        countEl.textContent = message || ''
+        if (themePicker && result && typeof result === 'object' && Array.isArray(result.commonThemeIds)) {
+          themePicker.setCommonIds(result.commonThemeIds)
+        }
+        // Count text length changes iframe height — notify once after settle, not per tick.
+        onLayoutChange?.()
       })
       .catch(() => {
-        if (seq === countSeq) countEl.textContent = 'Could not estimate puzzle count.'
+        if (seq !== countSeq) return
+        countEl.textContent = 'Could not estimate puzzle count.'
+        onLayoutChange?.()
       })
   }
 
+  // Debounce while dragging dual-range thumbs: live count + iframe resize on every
+  // `input` made the embedded/PWA dialog jitter (felt like vibration on mobile).
   const notifyFilterChange = () => {
-    refreshFilterCount()
-    onLayoutChange?.()
+    window.clearTimeout(filterNotifyTimer)
+    filterNotifyTimer = window.setTimeout(() => {
+      refreshFilterCount()
+    }, 120)
   }
 
   if (onFilterCount) {
@@ -1415,10 +1423,12 @@ function buildPuzzleThemePicker({ body, selected = [], options = [], commonIds =
   quickWrap.className = 'wiki-puzzle-theme-quick'
   const quickLabel = document.createElement('div')
   quickLabel.className = 'wiki-puzzle-theme-quick-label'
-  quickLabel.textContent = 'Common'
+  quickLabel.textContent = 'Recommended'
   const quickBadges = document.createElement('div')
   quickBadges.className = 'wiki-puzzle-theme-badges'
   quickWrap.append(quickLabel, quickBadges)
+
+  let activeCommonIds = Array.isArray(commonIds) ? [...commonIds] : []
 
   const syncReadout = () => {
     readout.textContent = chosen.size ? `${chosen.size} selected` : 'Any'
@@ -1479,7 +1489,7 @@ function buildPuzzleThemePicker({ body, selected = [], options = [], commonIds =
 
   const renderQuick = () => {
     quickBadges.replaceChildren()
-    const ids = Array.isArray(commonIds) && commonIds.length ? commonIds : options.slice(0, 18).map(opt => opt.id)
+    const ids = activeCommonIds.length ? activeCommonIds : options.slice(0, 18).map(opt => opt.id)
     for (const id of ids) {
       if (chosen.has(id)) continue
       const opt = optionById.get(id)
@@ -1552,6 +1562,10 @@ function buildPuzzleThemePicker({ body, selected = [], options = [], commonIds =
   return {
     get value() {
       return [...chosen]
+    },
+    setCommonIds(ids) {
+      activeCommonIds = Array.isArray(ids) ? ids.filter(id => optionById.has(id)) : []
+      renderQuick()
     },
   }
 }

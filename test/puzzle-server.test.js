@@ -100,6 +100,36 @@ describe('server · puzzle-server', () => {
     assert.equal(estimate.fullBytes, 1_000_000)
     assert.ok(estimate.filteredBytes < estimate.fullBytes)
     assert.ok(estimate.filteredCount <= estimate.totalCount)
+    assert.ok(estimate.themeCounts?.fork > 0)
+    assert.equal(estimate.themeCounts?.pin == null || estimate.themeCounts.pin === 0, true)
+  })
+
+  it('counts co-occurring themes among filtered estimate samples', async () => {
+    const lines = [
+      'PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl',
+      'a,fen,m,1500,80,90,1,fork mateIn1,url',
+      'b,fen,m,1500,80,90,1,fork pin,url',
+      'c,fen,m,1500,80,90,1,skewer,url',
+    ]
+    let cursor = 0
+    const offsets = [0]
+    for (const line of lines) {
+      cursor += line.length + 1
+      offsets.push(cursor)
+    }
+    const offsetBuf = Uint32Array.from(offsets.slice(0, -1))
+    const readLine = async (_fd, offset) => {
+      const idx = offsetBuf.indexOf(offset)
+      return idx >= 0 ? lines[idx] : lines[0]
+    }
+    const estimate = await estimateFilteredPuzzleDatabase(
+      { offsets: offsetBuf, fd: {}, readLine },
+      { themes: ['fork'] },
+      { fullBytes: 1000, sampleSize: 200 },
+    )
+    assert.ok(estimate.themeCounts.fork > 0)
+    assert.ok((estimate.themeCounts.mateIn1 || 0) + (estimate.themeCounts.pin || 0) > 0)
+    assert.equal(estimate.themeCounts.skewer == null || estimate.themeCounts.skewer === 0, true)
   })
 
   it('exposes puzzle database status with enabled flag from wiki config', () => {
@@ -118,4 +148,5 @@ describe('server · puzzle-server', () => {
     assert.equal(disabled.enabled, false)
     assert.equal(disabled.ready, false)
   })
+
 })

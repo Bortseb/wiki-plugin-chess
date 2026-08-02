@@ -35,6 +35,7 @@ import {
   challengeJoinGate,
   CHALLENGE_COLOR_BLACK,
   CHALLENGE_REJECT_OWNERS_ONLY,
+  CHALLENGE_REJECT_WRONG_SITE,
   sitesMatch,
   rateGame,
   rateEngineGame,
@@ -67,6 +68,7 @@ import {
   mergeFederationSitesCache,
   normalizeFederationSitesCache,
   refreshFederationSitesFromIndex,
+  fetchFarmPeerSites,
   normalizeNeighborhoodGraphOpts,
   shouldShowIslandNotice,
   normalizeSiteCrawlCache,
@@ -737,7 +739,7 @@ function localEngineSeat(pgn = currentPgn()) {
     .toLowerCase()
   if (!host) return null
 
-  return { host, humanSeat, engineLevel: engineSeat === 'w' ? whiteLevel : blackLevel }
+  return { site: host, humanSeat, engineLevel: engineSeat === 'w' ? whiteLevel : blackLevel }
 }
 
 // A FINISHED local engine game (a `localEngineSeat` plus a decisive/drawn result), or
@@ -758,7 +760,7 @@ function showOwnEngineRating() {
   const seat = localEngineSeat()
   if (!seat) return
   const store = storage()
-  const engineState = store ? loadEngineState(store, seat.host) : null
+  const engineState = store ? loadEngineState(store, seat.site) : null
   if (!engineState) return
   const color = seat.humanSeat === 'w' ? 'white' : 'black'
   discovered[color] = engineState
@@ -1041,7 +1043,7 @@ function siteSurveyCacheStorageKey(host) {
 }
 
 function storeSiteSurveyCache(entries, meta) {
-  const host = String(meta?.site ?? meta?.host ?? ctx?.viewingSite?.() ?? '')
+  const host = String(meta?.site ?? ctx?.viewingSite?.() ?? '')
     .trim()
     .toLowerCase()
   if (!host || !meta || !Array.isArray(meta.games)) return
@@ -1250,10 +1252,16 @@ export function setLbState(patch = {}) {
 }
 
 export function isPrimaryEmbedSurface() {
-  return Boolean(ctx?.wikiFrame && !ctx?.followsPopup)
+  // Must be the wiki iframe (not popup/PWA with window.opener as wikiFrame).
+  return Boolean(ctx?.isWikiEmbed && ctx?.wikiFrame && !ctx?.followsPopup)
 }
 
 export function isInAppSurveySurface() {
+  // Wiki iframe embeds stay on the wiki surface even when the parent wiki is an installed
+  // PWA (display-mode:standalone matches in nested frames and used to hide "New Chess Page").
+  // Do not key off isPrimaryEmbedSurface — a follower embed (followsPopup) is still a wiki
+  // iframe, not an in-app PWA/popup surface.
+  if (ctx?.isWikiEmbed) return false
   return Boolean(ctx?.pwaBridgeActive || ctx?.isPwaStandalone || ctx?.isWikiPopup)
 }
 
@@ -1339,7 +1347,9 @@ function updateSurveySectionHeading(section, label, count) {
 }
 
 function openMyChessGamesInWiki() {
-  if (!isPrimaryEmbedSurface()) return
+  // Any wiki iframe (including follower mode) opens the lineup page — never paint
+  // My Chess Games inside Chess Leaderboards / another maintenance embed.
+  if (!ctx?.isWikiEmbed || !ctx?.wikiFrame) return
   shellMessenger()?.openSurveyPage({ view: true })
 }
 
@@ -1393,7 +1403,9 @@ export function openMyChessGamesFromChooseMenu() {
     openSiteSurveyFromChooseMenu()
     return
   }
-  if (isPrimaryEmbedSurface()) {
+  // Wiki iframe (active or follower): open My Chess Games in the lineup — never swap the
+  // current embed (e.g. Chess Leaderboards) into an in-iframe site-survey view.
+  if (ctx?.isWikiEmbed) {
     openMyChessGamesInWiki()
     return
   }
@@ -1538,7 +1550,7 @@ export function handleLeaderboardData(data) {
   } else if (entries.length) {
     const players = {}
     for (const row of entries) {
-      const site = row?.site ?? row?.host
+      const site = row?.site
       if (!site) continue
       players[cleanSite(site)] = normalizeRatingState({
         rating: row.rating,
@@ -1690,12 +1702,21 @@ function beginDeferredSiteSurveyWork(boardSeq = null) {
       : Array.isArray(lbMeta?.openSeeks)
         ? lbMeta.openSeeks
         : []
-  shellMessenger()?.buildChallenges({
-    seq,
-    forSiteSurvey: true,
-    localOpenChallenges,
-    ...federationIndexedDbPayload(),
-  })
+  const localSite = String(ctx?.viewingSite?.() || (typeof location !== 'undefined' ? location.host : '') || '')
+    .trim()
+    .toLowerCase()
+  // Farm peers: browser calls wiki-plugin-present; shell/PWA only receive the host list.
+  void fetchFarmPeerSites({ localSite })
+    .catch(() => [])
+    .then(farmPeerSites => {
+      shellMessenger()?.buildChallenges({
+        seq,
+        forSiteSurvey: true,
+        localOpenChallenges,
+        farmPeerSites: Array.isArray(farmPeerSites) ? farmPeerSites : [],
+        ...federationIndexedDbPayload(),
+      })
+    })
   if (lbMeta?.siteGamesEnrichmentPending) {
     // Reuse fast-path meta.games so enrich skips a second site crawl.
     const fetchedGames = Array.isArray(lbMeta.games) ? lbMeta.games : []
@@ -1707,7 +1728,7 @@ function beginDeferredSiteSurveyWork(boardSeq = null) {
 }
 
 function creatorForkBackPendingGamesFromMeta(meta = lbMeta) {
-  const host = cleanSite(meta?.site ?? meta?.host ?? ctx?.viewingSite?.() ?? '')
+  const host = cleanSite(meta?.site ?? ctx?.viewingSite?.() ?? '')
   const ghosts = Array.isArray(meta?.acceptedGhosts) ? meta.acceptedGhosts : []
   return buildAcceptedGhostGamesList(ghosts, host)
 }
@@ -1928,7 +1949,7 @@ export function primeBoardFromIndexedDb() {
   if (!surveyEntries.length) return false
   const pastOpponents = Array.isArray(indexedDbMemory.meta?.pastOpponents)
     ? indexedDbMemory.meta.pastOpponents
-    : surveyEntries.map(row => row.site ?? row.host).filter(h => h && !sitesMatch(h, localSite))
+    : surveyEntries.map(row => row.site).filter(h => h && !sitesMatch(h, localSite))
   const meta = {
     mode: 'survey',
     generatedAt: indexedDbMemory.meta?.lastGlobalSyncAt || Date.now(),
@@ -2162,7 +2183,7 @@ function siteSurveySeekEntry(itemId) {
     lbMeta?.blockList || indexedDbMemory.meta?.blockList,
   )
   const { acceptedMine, mine, joinable, directedAtMe } = partitionOpenChallenges(filtered, {
-    viewingSite: ctx?.viewingSite?.() || lbMeta?.site || lbMeta?.host || '',
+    viewingSite: ctx?.viewingSite?.() || lbMeta?.site || '',
     viewerRating: ctx?.viewerRating?.(),
     acceptedGhosts: lbMeta?.acceptedGhosts || [],
     isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
@@ -2228,6 +2249,7 @@ export function wireLeaderboardView() {
     })
   })
   el('wikiChessLbAddOpponents')?.addEventListener('click', () => leaderboardUi?.addPastOpponentsToNeighborhood?.())
+  el('wikiChessLbAddPeers')?.addEventListener('click', () => leaderboardUi?.addFarmPeersToNeighborhood?.())
   leaderboardUi?.wireHopGraphDials?.()
   el('wikiChessLbBack')?.addEventListener('click', () => {
     closeActiveModal({ discardSuspended: true, restoreMount: false })
@@ -2436,6 +2458,7 @@ export function renderLeaderboard() {
   reconcileSurveyNavButtons(isAllProbe)
   leaderboardUi?.renderHopGraphPanel?.()
   leaderboardUi?.renderAddOpponentsToNeighborhoodButton?.()
+  leaderboardUi?.renderAddPeersToNeighborhoodButton?.()
   renderSiteSurveyActions()
   leaderboardUi?.renderLbUpdating?.()
 
@@ -2683,7 +2706,7 @@ function siteSurveyOpenChallengeRows() {
     acceptedMine: seekAccepted,
     directedAtMe: seekDirected,
   } = partitionOpenChallenges(openChallengesFiltered, {
-    viewingSite: ctx?.viewingSite?.() || lbMeta?.site || lbMeta?.host || '',
+    viewingSite: ctx?.viewingSite?.() || lbMeta?.site || '',
     viewerRating: ctx?.viewerRating?.(),
     acceptedGhosts: lbMeta?.acceptedGhosts || [],
     isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
@@ -2705,7 +2728,9 @@ function renderSiteSurveyOpenChallenges() {
     emptyText: 'No open challenges found across the federation yet.',
     showPostChallenge: canShowSiteSurveyActions(),
     loading: openChallengesLoading,
-    loadingText: openChallengesLoading ? 'Searching neighbourhood and past opponents for open challenges…' : '',
+    loadingText: openChallengesLoading
+      ? 'Searching neighbourhood, farm peers, and past opponents for open challenges…'
+      : '',
   })
   if (scroll) scroll.scrollTop = prevScrollTop
   return true
@@ -3009,6 +3034,39 @@ function formatGameDateShort(date) {
   return `${m[1].slice(-2)}-${m[2]}-${m[3]}`
 }
 
+function formatLocalDateShort(d) {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return ''
+  const yy = String(d.getFullYear()).slice(-2)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yy}-${mm}-${dd}`
+}
+
+function gameEndInstant(g) {
+  const endRaw =
+    (g.pgn ? getPgnTag(g.pgn, 'TerminationTimestamp') : '') || g.terminationTimestamp || ''
+  const endMs = Date.parse(String(endRaw).trim())
+  return Number.isFinite(endMs) ? new Date(endMs) : null
+}
+
+// Compact labels under the badge: start (+ end when TerminationTimestamp is known).
+// Same local calendar day collapses to one line; hover still carries both instants.
+function gameDateLabelParts(g) {
+  const utcDate = g.utcDate || (g.pgn ? getPgnTag(g.pgn, 'UTCDate') : '') || ''
+  const utcTime = g.utcTime || (g.pgn ? getPgnTag(g.pgn, 'UTCTime') : '') || ''
+  const start = gameStartInstant({ utcDate, utcTime })
+  let startShort = start ? formatLocalDateShort(start) : ''
+  if (!startShort) {
+    const date = String(g.date || '').trim()
+    if (date) startShort = formatGameDateShort(date)
+    else if (utcDate) startShort = formatGameDateShort(utcDate)
+  }
+  const end = gameEndInstant(g)
+  const endShort = end ? formatLocalDateShort(end) : ''
+  if (startShort && endShort && startShort !== endShort) return { startShort, endShort }
+  return { startShort: startShort || endShort, endShort: '' }
+}
+
 // Hover details for the date column: full start/end instants when the PGN carries them.
 function gameDateHoverTitle(g) {
   const lines = []
@@ -3021,12 +3079,8 @@ function gameDateHoverTitle(g) {
     const date = String(g.date || '').trim()
     if (date) lines.push(`Started: ${date}`)
   }
-  const endRaw =
-    (g.pgn ? getPgnTag(g.pgn, 'TerminationTimestamp') : '') || g.terminationTimestamp || ''
-  const endMs = Date.parse(String(endRaw).trim())
-  if (Number.isFinite(endMs)) {
-    lines.push(`Ended: ${formatLocalISO8601(new Date(endMs))}`)
-  }
+  const end = gameEndInstant(g)
+  if (end) lines.push(`Ended: ${formatLocalISO8601(end)}`)
   return lines.join('\n')
 }
 
@@ -3062,12 +3116,17 @@ function gameLinkFor(g) {
   const resultCol = document.createElement('span')
   resultCol.className = 'wiki-chess-lb-game-result-col'
   resultCol.appendChild(result)
-  // Compact start date under the badge; full start/end instants on hover.
-  const date = String(g.date || '').trim()
-  if (date) {
+  // Compact start (+ end) under the badge; exact local times on hover.
+  const { startShort, endShort } = gameDateLabelParts(g)
+  if (startShort) {
     const dateEl = document.createElement('span')
     dateEl.className = 'wiki-chess-lb-game-date'
-    dateEl.textContent = formatGameDateShort(date)
+    if (endShort) {
+      dateEl.classList.add('is-range')
+      dateEl.textContent = `${startShort}\n${endShort}`
+    } else {
+      dateEl.textContent = startShort
+    }
     const hover = gameDateHoverTitle(g)
     if (hover) dateEl.title = hover
     resultCol.appendChild(dateEl)
@@ -3192,7 +3251,7 @@ function canManageOpenChallenge(entry) {
   const viewingSite = String(ctx.viewingSite?.() || '')
     .trim()
     .toLowerCase()
-  const entrySite = String(entry.site ?? entry.host ?? '')
+  const entrySite = String(entry.site ?? '')
     .trim()
     .toLowerCase()
   return Boolean(viewingSite && entrySite && sitesMatch(entrySite, viewingSite))
@@ -3211,7 +3270,7 @@ function dispatchOpenChallengeSeekClick(link, entry, { append = false } = {}) {
   const isAccepted = Boolean(entry?.accepted && entry?.acceptedGame?.slug)
   const slug = isAccepted ? entry.acceptedGame.slug : link.getAttribute('data-ch-slug') || ''
   const host = isAccepted
-    ? (entry.acceptedGame.site ?? entry.acceptedGame.host ?? link.getAttribute('data-ch-host') ?? '')
+    ? (entry.acceptedGame.site ?? link.getAttribute('data-ch-host') ?? '')
     : link.getAttribute('data-ch-host') || ''
   const itemId = link.getAttribute('data-ch-item-id') || ''
   const title = isAccepted
@@ -3222,7 +3281,7 @@ function dispatchOpenChallengeSeekClick(link, entry, { append = false } = {}) {
   if (!slug && !(pending && pgn)) return
   const challenge = entry?.challenge
   const ghost = shouldGhostJoinOpenChallenge(entry, { slug, pgn, host })
-  const ghostSite = String(challenge?.creator?.site ?? challenge?.creator?.host ?? host ?? '').trim()
+  const ghostSite = String(challenge?.creator?.site ?? host ?? '').trim()
   shellMessenger()?.openGamePage({
     slug: ghost ? '' : slug,
     site: ghost ? ghostSite : host,
@@ -3235,19 +3294,19 @@ function dispatchOpenChallengeSeekClick(link, entry, { append = false } = {}) {
   })
 }
 
-function applySurveyOpenChallengeEdit(entry, { rated, allowGuests, creatorColor, minRating, maxRating }) {
+function applySurveyOpenChallengeEdit(entry, { rated, creatorColor, minRating, maxRating }) {
   const challenge = entry?.challenge
   if (!challenge || !entry.itemId || !entry.pgn) return
 
   const updated = buildOpenChallenge({
     rated,
-    allowGuests,
     creatorColor,
     minRating,
     maxRating,
     creatorId: challenge.creator?.id || '',
-    creatorSite: challenge.creator?.site ?? challenge.creator?.host ?? '',
+    creatorSite: challenge.creator?.site ?? '',
     creatorRating: challenge.creator?.rating ?? null,
+    challengeTarget: challenge.challengeTarget || '',
     ts: challenge.ts || Date.now(),
   })
   if (!updated) return
@@ -3281,7 +3340,6 @@ function openOwnOpenChallengeModal(entry) {
     {
       title: entry.title || 'Open challenge',
       rated: cfg.rated,
-      allowGuests: cfg.allowGuests !== false,
       creatorColor: cfg.creatorColor,
       minRating: cfg.minRating,
       maxRating: cfg.maxRating,
@@ -3328,7 +3386,7 @@ function openChallengeSubline(entry, { accepted = false, directed = false } = {}
     includeColor: false,
   })
   if (isAccepted) {
-    const gameSite = entry.acceptedGame?.site ?? entry.acceptedGame?.host ?? entry.site ?? entry.host ?? ''
+    const gameSite = entry.acceptedGame?.site ?? entry.site ?? ''
     return [
       `Accepted by ${entry.opponentLabel || playerDisplayLabel(challenge?.opponent?.id || '') || gameSite}`,
       'fork their copy to play',
@@ -3355,6 +3413,7 @@ function siteSeekRowFor(entry) {
       ? challengeJoinGate(challenge, {
           viewerRating: ctx?.viewerRating?.(),
           isAuthenticatedOwner: Boolean(ctx?.isAuthenticatedOwner?.()),
+          viewingSite: ctx?.viewingSite?.() || '',
         })
       : { ok: false }
   const canJoin = !own && !isAccepted && gate.ok
@@ -3364,8 +3423,8 @@ function siteSeekRowFor(entry) {
   link.type = 'button'
   link.className = 'wiki-chess-lb-game-link'
   const gameSite = isAccepted
-    ? (entry.acceptedGame?.site ?? entry.acceptedGame?.host ?? entry.site ?? entry.host ?? '')
-    : (entry.site ?? entry.host ?? ctx?.viewingSite?.() ?? '')
+    ? (entry.acceptedGame?.site ?? entry.site ?? '')
+    : (entry.site ?? ctx?.viewingSite?.() ?? '')
   const gameSlug = isAccepted ? entry.acceptedGame?.slug || entry.slug || '' : entry.slug || ''
   link.setAttribute('data-ch-slug', gameSlug)
   link.setAttribute('data-ch-host', gameSite)
@@ -3448,7 +3507,7 @@ function siteSeekRowFor(entry) {
     note.textContent = 'Join \u203a'
   } else {
     note.classList.add('is-blocked')
-    note.textContent = challengeRejectNote(gate.reason, cfg)
+    note.textContent = challengeRejectNote(gate.reason, cfg, challenge)
   }
   link.appendChild(note)
   li.appendChild(link)
@@ -3566,10 +3625,14 @@ function renderLbStatus() {
   status.textContent = `${players} rated ${noun} across ${sites} ${sites === 1 ? 'site' : 'sites'}${filterNote}.${twinNote}`
 }
 
-function challengeRejectNote(reason, cfg) {
+function challengeRejectNote(reason, cfg, challenge) {
   if (reason === 'rating-below-min') return `Min ${cfg.minRating}`
   if (reason === 'rating-above-max') return `Max ${cfg.maxRating}`
   if (reason === 'rating-unknown') return 'Rating required'
-  if (reason === CHALLENGE_REJECT_OWNERS_ONLY) return cfg?.rated ? 'Owners only (rated)' : 'Owners only'
+  if (reason === CHALLENGE_REJECT_OWNERS_ONLY) {
+    if (challenge?.challengeTarget) return "Sign in as that wiki's owner"
+    return 'Owners only'
+  }
+  if (reason === CHALLENGE_REJECT_WRONG_SITE) return 'Wrong wiki'
   return "Can't join"
 }

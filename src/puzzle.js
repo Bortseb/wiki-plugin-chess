@@ -44,6 +44,7 @@ import {
   PUZZLE_POPULARITY_BOUNDS,
   PUZZLE_THEME_OPTIONS,
   PUZZLE_COMMON_THEME_IDS,
+  rankCommonPuzzleThemes,
   parsePuzzleRow,
   parsePuzzleBankContent,
   parsePuzzleJsonLine,
@@ -147,7 +148,7 @@ export function parsePuzzlesCsv(text) {
 
 export function selectPuzzle(puzzles, options = {}) {
   const { themes, minRating, maxRating, minPopularity, maxPopularity, exclude, random = Math.random } = options
-  const wanted = themes && themes.length ? new Set(themes) : null
+  const wanted = themes && themes.length ? themes : null
   const skip = exclude ? new Set(exclude) : null
   const pool = (Array.isArray(puzzles) ? puzzles : []).filter(p => {
     if (skip && skip.has(p.id)) return false
@@ -155,7 +156,7 @@ export function selectPuzzle(puzzles, options = {}) {
     if (typeof maxRating === 'number' && p.rating > maxRating) return false
     if (typeof minPopularity === 'number' && p.popularity < minPopularity) return false
     if (typeof maxPopularity === 'number' && p.popularity > maxPopularity) return false
-    if (wanted && !p.themes.some(t => wanted.has(t))) return false
+    if (wanted && !wanted.every(t => p.themes.includes(t))) return false
     return true
   })
   if (!pool.length) return null
@@ -1337,20 +1338,39 @@ function puzzlePassesFilters(puzzle, filters = activePuzzleFilters()) {
 }
 
 async function puzzleFilterCountLabel(values) {
+  const filters = normalizePuzzleFilters(values)
+  const selectedThemes = Array.isArray(filters.themes) ? filters.themes : []
   try {
-    const est = await fetchLocalPuzzleDownloadEstimate(normalizePuzzleFilters(values))
+    const est = await fetchLocalPuzzleDownloadEstimate(filters)
     const n = Number(est.filteredCount ?? est.totalCount ?? 0)
+    const commonThemeIds = rankCommonPuzzleThemes(
+      est.hasFilters && est.themeCounts && typeof est.themeCounts === 'object' ? est.themeCounts : null,
+      { exclude: selectedThemes },
+    )
     if (!n) {
       // Farm DB not indexed yet (or disabled) — Play still draws from Lichess/API when online.
-      return 'Farm puzzle count unavailable — Play may still load puzzles from the network.'
+      return {
+        message: 'Farm puzzle count unavailable — Play may still load puzzles from the network.',
+        commonThemeIds,
+      }
     }
     if (est.hasFilters && est.matchRatio != null && est.matchRatio < 1) {
-      return `About ${n.toLocaleString()} puzzles match`
+      return { message: `About ${n.toLocaleString()} puzzles match`, commonThemeIds }
     }
-    return `${n.toLocaleString()} puzzles match`
+    return { message: `${n.toLocaleString()} puzzles match`, commonThemeIds }
   } catch {
-    return 'Puzzle count unavailable — Play may still load puzzles from the network.'
+    return {
+      message: 'Puzzle count unavailable — Play may still load puzzles from the network.',
+      commonThemeIds: rankCommonPuzzleThemes(null, { exclude: selectedThemes }),
+    }
   }
+}
+
+// Popularity lives only in the farm/local CSV dump — hide the slider unless a
+// source that can honour it is ready (farm DB ready, or on-device copy ready).
+function canFilterByPopularity() {
+  if (localPuzzleDownloadReady()) return true
+  return Boolean(farmDbConfig?.enabled && farmDbConfig?.ready)
 }
 
 // Open the filter modal, then run `onChosen` once the player commits a selection.
@@ -1358,31 +1378,45 @@ async function puzzleFilterCountLabel(values) {
 // (no puzzle load, no mode switch).
 export function promptPuzzleFilters(onChosen, { onCancel } = {}) {
   const f = puzzleFilters || {}
+  const popularityOk = canFilterByPopularity()
+  // Drop stale popularity bounds when the slider is unavailable so Play cannot
+  // fail with "popularity-needs-farm" on a filter the player cannot see or clear.
+  if (!popularityOk && (typeof f.minPopularity === 'number' || typeof f.maxPopularity === 'number')) {
+    const next = { ...f }
+    delete next.minPopularity
+    delete next.maxPopularity
+    puzzleFilters = next
+  }
+  const filterState = puzzleFilters || {}
   const { mount, embedded, restore } = embeddedModalMount()
+  const ranges = [
+    {
+      key: 'rating',
+      label: 'Rating',
+      min: PUZZLE_RATING_BOUNDS.min,
+      max: PUZZLE_RATING_BOUNDS.max,
+      step: PUZZLE_RATING_BOUNDS.step,
+      low: filterState.minRating ?? PUZZLE_RATING_BOUNDS.min,
+      high: filterState.maxRating ?? PUZZLE_RATING_BOUNDS.max,
+    },
+  ]
+  if (popularityOk) {
+    ranges.push({
+      key: 'popularity',
+      label: 'Popularity',
+      min: PUZZLE_POPULARITY_BOUNDS.min,
+      max: PUZZLE_POPULARITY_BOUNDS.max,
+      step: PUZZLE_POPULARITY_BOUNDS.step,
+      low: filterState.minPopularity ?? PUZZLE_POPULARITY_BOUNDS.min,
+      high: filterState.maxPopularity ?? PUZZLE_POPULARITY_BOUNDS.max,
+    })
+  }
   openPuzzleFilterModal({
-    intro: 'Choose which puzzles to draw from. Narrow the range, pick themes, or leave it wide for any puzzle.',
-    ranges: [
-      {
-        key: 'rating',
-        label: 'Rating',
-        min: PUZZLE_RATING_BOUNDS.min,
-        max: PUZZLE_RATING_BOUNDS.max,
-        step: PUZZLE_RATING_BOUNDS.step,
-        low: f.minRating ?? PUZZLE_RATING_BOUNDS.min,
-        high: f.maxRating ?? PUZZLE_RATING_BOUNDS.max,
-      },
-      {
-        key: 'popularity',
-        label: 'Popularity',
-        min: PUZZLE_POPULARITY_BOUNDS.min,
-        max: PUZZLE_POPULARITY_BOUNDS.max,
-        step: PUZZLE_POPULARITY_BOUNDS.step,
-        low: f.minPopularity ?? PUZZLE_POPULARITY_BOUNDS.min,
-        high: f.maxPopularity ?? PUZZLE_POPULARITY_BOUNDS.max,
-      },
-    ],
+    intro:
+      'Choose which puzzles to draw from. Narrow the range, pick themes (all selected themes must match), or leave it wide for any puzzle.',
+    ranges,
     themes: {
-      selected: Array.isArray(f.themes) ? f.themes : [],
+      selected: Array.isArray(filterState.themes) ? filterState.themes : [],
       options: PUZZLE_THEME_OPTIONS,
       common: PUZZLE_COMMON_THEME_IDS,
     },
@@ -1394,7 +1428,7 @@ export function promptPuzzleFilters(onChosen, { onCancel } = {}) {
       restore?.()
       const preserved = {}
       for (const key of ['random', 'adaptive', 'tags', 'pageSlugs', 'solvedIds', 'failedIds']) {
-        if (f[key] != null) preserved[key] = f[key]
+        if (filterState[key] != null) preserved[key] = filterState[key]
       }
       puzzleFilters = { ...preserved, ...normalizePuzzleFilters(values) }
       mixedPuzzlePool =
@@ -1619,9 +1653,9 @@ async function fetchFarmPuzzle(filters = {}) {
 async function fetchApiPuzzle(filters = {}) {
   try {
     const params = new URLSearchParams()
-    // Lichess accepts one theme at a time via `angle`; when the item lists several
-    // (e.g. themes=fork,pin) we pick the first and still accept any listed theme
-    // in puzzlePassesFilters below.
+    // Lichess accepts one theme at a time via `angle`; when several are listed
+    // (AND match), request the first and let puzzlePassesFilters reject rows that
+    // lack the rest so resolveNextPuzzle can retry.
     const angle = filters.angle || filters.themes?.[0]
     if (angle) params.set('angle', angle)
     if (filters.difficulty) params.set('difficulty', filters.difficulty)

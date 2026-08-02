@@ -158,7 +158,7 @@ describe('server · pwa-bridge', () => {
     )
   })
 
-  it('stores open challenges on the SURVEY item metadata', () => {
+  it('stores open challenges on the My Chess Games page charm', () => {
     const surveyItem = SURVEY_PAGE_STORY.find(i => i.type === 'chess')
     const page = {
       title: 'My Chess Games',
@@ -179,19 +179,21 @@ describe('server · pwa-bridge', () => {
         challenge: {
           status: 'open',
           config: { rated: false, creatorColor: 'random' },
-          creator: { id: 'host (You)', host: 'localhost' },
+          creator: { id: 'host (You)', site: 'localhost' },
         },
       },
     })
     assert.equal(result.changed, true)
-    const updated = page.story.find(i => isSurveyItemText(i.text))
-    assert.equal(updated.openChallenges.length, 1)
-    assert.equal(updated.openChallenges[0].itemId, 'ghost1')
-    assert.equal(updated.openChallenges[0].challenge.creator.site, 'localhost')
-    assert.equal(updated.openChallenges[0].challenge.creator.host, undefined)
+    assert.equal(page.journal.filter(entry => entry.type === 'edit').length, 0)
+    const survey = page.story.find(i => isSurveyItemText(i.text))
+    assert.equal(survey.openChallenges, undefined)
+    assert.equal(page.chess?.openChallenges?.length, 1)
+    assert.equal(page.chess.openChallenges[0].itemId, 'ghost1')
+    assert.equal(page.chess.openChallenges[0].challenge.creator.site, 'localhost')
+    assert.equal(page.chess.openChallenges[0].challenge.creator.host, undefined)
   })
 
-  it('stores page-backed open challenges with a game slug on the SURVEY item', () => {
+  it('stores page-backed open challenges with a game slug on the page charm', () => {
     const surveyItem = SURVEY_PAGE_STORY.find(i => i.type === 'chess')
     const page = {
       title: 'My Chess Games',
@@ -213,14 +215,13 @@ describe('server · pwa-bridge', () => {
         challenge: {
           status: 'open',
           config: { rated: false, creatorColor: 'random' },
-          creator: { id: 'host (You)', host: 'localhost' },
+          creator: { id: 'host (You)', site: 'localhost' },
         },
       },
     })
     assert.equal(result.changed, true)
-    const updated = page.story.find(i => isSurveyItemText(i.text))
-    assert.equal(updated.openChallenges[0].slug, 'welcome-visitors')
-    assert.equal(updated.openChallenges[0].itemId, 'page-item')
+    assert.equal(page.chess?.openChallenges?.[0]?.slug, 'welcome-visitors')
+    assert.equal(page.chess.openChallenges[0].itemId, 'page-item')
   })
 
   it('builds a join-challenge page with seated PGN', () => {
@@ -250,12 +251,13 @@ describe('server · pwa-bridge', () => {
     assert.equal(para?.text, 'Bob (local.test) accepts an open challenge from Alice (remote).')
   })
 
-  it('seats an unauthenticated joiner as plain Guest, not the public site owner', () => {
+  it('never wraps an unauthenticated joiner with the public site owner name if seated', () => {
+    // Join UI is owners-only; this guards the seat-id helper if a guest path is invoked.
     const payload = buildJoinChallengePage({
       ghostPgn: '[White "remote (Alice)"]\n[Black ""]\n[Result "*"]\n\n*',
       challenge: {
         status: 'open',
-        config: { rated: false, creatorColor: 'w', allowGuests: true },
+        config: { rated: false, creatorColor: 'w' },
         creator: { id: 'remote (Alice)', site: 'remote.test' },
       },
       itemId: 'ghost-guest',
@@ -405,7 +407,7 @@ describe('server · pwa-bridge', () => {
             story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
             chess: {
               gameIndex: {
-                completed: [{ host, slug: 'test-game', itemId: 'game1' }],
+                completed: [{ site: host, slug: 'test-game', itemId: 'game1' }],
                 active: [],
                 challenges: [],
               },
@@ -424,7 +426,7 @@ describe('server · pwa-bridge', () => {
     const { entries, meta } = await buildSiteSurveyAsync(site, 'localhost', 'my-chess-games')
     assert.ok(Array.isArray(entries))
     assert.equal(meta.mode, 'site')
-    assert.equal(meta.host, 'localhost')
+    assert.equal(meta.site, 'localhost')
     assert.ok(Array.isArray(meta.games))
     assert.equal(meta.games.length, 1)
     assert.equal(meta.games[0].active, true)
@@ -502,7 +504,7 @@ describe('server · pwa-bridge', () => {
             story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
             chess: {
               gameIndex: {
-                completed: [{ host, slug: 'rated-game', itemId: 'game1' }],
+                completed: [{ site: host, slug: 'rated-game', itemId: 'game1' }],
                 active: [],
                 challenges: [],
               },
@@ -544,7 +546,7 @@ describe('server · pwa-bridge', () => {
             story: SURVEY_PAGE_STORY.map(e => ({ ...e })),
             chess: {
               gameIndex: {
-                completed: [{ host, slug: 'rated-game', itemId: 'game1' }],
+                completed: [{ site: host, slug: 'rated-game', itemId: 'game1' }],
                 active: [],
                 challenges: [],
               },
@@ -882,7 +884,7 @@ describe('server · pwa-bridge OPEN_GAME_PAGE', () => {
   it('LOOKUP_SITE_DISPLAY replies with SITE_DISPLAY (matches shell/app contract)', async () => {
     assert.equal(MSG.HOST_DISPLAY, undefined)
     const res = await dispatchOpenGame(
-      { action: MSG.LOOKUP_SITE_DISPLAY, requestId: 'req-1', host: 'unreachable.test' },
+      { action: MSG.LOOKUP_SITE_DISPLAY, requestId: 'req-1', site: 'unreachable.test' },
       {},
     )
     assert.equal(res.statusCode, 200)

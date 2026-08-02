@@ -100,12 +100,12 @@
     {
       "type": "markdown",
       "id": "18293a4b5c6d7e8f",
-      "text": "`rating=` and `popularity=` accept an inclusive range (`1500..2000`) or a single lower bound (`1500`). `themes=` is a comma-separated list of Lichess theme ids (OR match). `tags=` filters arbitrary author tags on JSONL banks. `pages=` names comma-separated page slugs whose chess items contribute curated puzzles."
+      "text": "`rating=` and `popularity=` accept an inclusive range (`1500..2000`) or a single lower bound (`1500`). `themes=` is a comma-separated list of Lichess theme ids (AND match — every listed theme must appear). `tags=` filters arbitrary author tags on JSONL banks. `pages=` names comma-separated page slugs whose chess items contribute curated puzzles."
     },
     {
       "type": "chess",
       "id": "e8f3b2a1c9d04756",
-      "text": "PUZZLE RANDOM rating=700..1200 themes=fork,pin\n{\"id\":\"demoForkLead\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"keyword-demo\"],\"rating\":800,\"prompt\":\"Lead puzzle: fork the king and queen.\",\"source\":\"custom\",\"noSetup\":true}"
+      "text": "PUZZLE RANDOM rating=700..1200 themes=fork\n{\"id\":\"demoForkLead\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"keyword-demo\"],\"rating\":800,\"prompt\":\"Lead puzzle: fork the king and queen.\",\"source\":\"custom\",\"noSetup\":true}"
     },
     {
       "type": "pagefold",
@@ -120,7 +120,7 @@
     {
       "type": "code",
       "id": "d6e7f8091a2b3c4d",
-      "text": "PUZZLE RANDOM rating=700..1200 themes=fork,pin pages=the-fork,my-annotated-puzzles\n{\"id\":\"demoPin1\",\"fen\":\"r1bqk2r/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4\",\"moves\":[\"d7d6\",\"b5c6\"],\"themes\":[\"pin\"],\"tags\":[\"absolutePin\"],\"rating\":820}\n{\"id\":\"oldGameFork\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"old-game\"],\"rating\":850,\"prompt\":\"Fork the king and queen.\",\"noSetup\":true}",
+      "text": "PUZZLE RANDOM rating=700..1200 pages=the-fork,my-annotated-puzzles\n{\"id\":\"demoPin1\",\"fen\":\"r1bqk2r/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4\",\"moves\":[\"d7d6\",\"b5c6\"],\"themes\":[\"pin\"],\"tags\":[\"absolutePin\"],\"rating\":820}\n{\"id\":\"oldGameFork\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"old-game\"],\"rating\":850,\"prompt\":\"Fork the king and queen.\",\"noSetup\":true}",
       "language": "text"
     },
     {
@@ -168,6 +168,185 @@
       "type": "chess",
       "id": "b2c3d4e5f6789012",
       "text": "LEADERBOARD"
+    }
+  ],
+  "journal": [
+    {
+      "type": "create",
+      "item": {
+        "title": "Chess Keyword Examples",
+        "story": [
+          {
+            "type": "paragraph",
+            "id": "ac763a7c6e20276c",
+            "text": "Live demos of each chess keyword are provided below:"
+          },
+          {
+            "type": "pagefold",
+            "id": "e9b4c3a032402eff",
+            "text": "CHOOSE"
+          },
+          {
+            "type": "markdown",
+            "id": "a1b2c3d4e5f60701",
+            "text": "Opens the main menu that lets you pick a mode of play. Stays CHOOSE in the journal until you pick an activity."
+          },
+          {
+            "type": "chess",
+            "id": "9dd2a9ce65a07196",
+            "text": "CHOOSE"
+          },
+          {
+            "type": "pagefold",
+            "id": "83b038c47f522336",
+            "text": "POSITION"
+          },
+          {
+            "type": "markdown",
+            "id": "b2c3d4e5f6071829",
+            "text": "Opens the FEN position editor."
+          },
+          {
+            "type": "chess",
+            "id": "b2f48b263e6aeb2f",
+            "text": "POSITION"
+          },
+          {
+            "type": "pagefold",
+            "id": "30f41b84d5a5c781",
+            "text": "GAME"
+          },
+          {
+            "type": "markdown",
+            "id": "c3d4e5f607182930",
+            "text": "Starts a new playable game. Item text stays `GAME` until the first move saves full PGN."
+          },
+          {
+            "type": "chess",
+            "id": "5f633808e0257b3a",
+            "text": "GAME"
+          },
+          {
+            "type": "pagefold",
+            "id": "3668ef5b49aa8eed",
+            "text": "PUZZLE"
+          },
+          {
+            "type": "markdown",
+            "id": "d4e5f60718293a4b",
+            "text": "Bare `PUZZLE` opens the filter menu first, then draws a puzzle from the farm puzzle database (when installed on your wiki farm) or the Lichess API. Solving never writes to the journal."
+          },
+          {
+            "type": "chess",
+            "id": "d9257d206a2cb881",
+            "text": "PUZZLE"
+          },
+          {
+            "type": "pagefold",
+            "id": "f1a2b3c4d5e6f708",
+            "text": "PUZZLE RANDOM"
+          },
+          {
+            "type": "markdown",
+            "id": "e5f60718293a4b5c",
+            "text": "The `RANDOM` modifier skips the filter chooser and draws a puzzle immediately."
+          },
+          {
+            "type": "chess",
+            "id": "c7e2a1f4b8d0639e",
+            "text": "PUZZLE RANDOM"
+          },
+          {
+            "type": "pagefold",
+            "id": "a2b3c4d5e6f70819",
+            "text": "PUZZLE with filters"
+          },
+          {
+            "type": "markdown",
+            "id": "f60718293a4b5c6d",
+            "text": "Append `key=value` tokens after `PUZZLE` (or after `RANDOM`) to narrow the draw — same bounds as the in-app filter modal:"
+          },
+          {
+            "type": "code",
+            "id": "0718293a4b5c6d7e",
+            "text": "PUZZLE rating=1500..2000 themes=fork,pin\nPUZZLE RANDOM popularity=50..\nPUZZLE rating=1500",
+            "language": "text"
+          },
+          {
+            "type": "markdown",
+            "id": "18293a4b5c6d7e8f",
+            "text": "`rating=` and `popularity=` accept an inclusive range (`1500..2000`) or a single lower bound (`1500`). `themes=` is a comma-separated list of Lichess theme ids (AND match — every listed theme must appear). `tags=` filters arbitrary author tags on JSONL banks. `pages=` names comma-separated page slugs whose chess items contribute curated puzzles."
+          },
+          {
+            "type": "chess",
+            "id": "e8f3b2a1c9d04756",
+            "text": "PUZZLE RANDOM rating=700..1200 themes=fork\n{\"id\":\"demoForkLead\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"keyword-demo\"],\"rating\":800,\"prompt\":\"Lead puzzle: fork the king and queen.\",\"source\":\"custom\",\"noSetup\":true}"
+          },
+          {
+            "type": "pagefold",
+            "id": "b4c5d6e7f8091a2b",
+            "text": "PUZZLE multiline bank"
+          },
+          {
+            "type": "markdown",
+            "id": "c5d6e7f8091a2b3c",
+            "text": "Put **one puzzle per line** after `PUZZLE` (JSONL objects preferred; Lichess CSV rows still work). Filters and `pages=slug-one,slug-two` stay on the first line. The first matching inline puzzle leads; **New Puzzle** then alternates curated puzzles with matching farm/Lichess draws. Referenced pages may host larger annotated teaching PGNs. References are one level deep; fork those pages too when sharing the bank through the federation. Double-click to edit: **Enter inserts a newline** (Esc or Ctrl/Cmd+S saves). Solving never auto-writes the journal."
+          },
+          {
+            "type": "code",
+            "id": "d6e7f8091a2b3c4d",
+            "text": "PUZZLE RANDOM rating=700..1200 pages=the-fork,my-annotated-puzzles\n{\"id\":\"demoPin1\",\"fen\":\"r1bqk2r/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4\",\"moves\":[\"d7d6\",\"b5c6\"],\"themes\":[\"pin\"],\"tags\":[\"absolutePin\"],\"rating\":820}\n{\"id\":\"oldGameFork\",\"fen\":\"q3k3/8/8/3N4/8/8/8/4K3 w - - 0 1\",\"moves\":[\"d5c7\"],\"themes\":[\"fork\"],\"tags\":[\"old-game\"],\"rating\":850,\"prompt\":\"Fork the king and queen.\",\"noSetup\":true}",
+            "language": "text"
+          },
+          {
+            "type": "pagefold",
+            "id": "a1b2c3d4e5f60718",
+            "text": "PUZZLE teaching PGN"
+          },
+          {
+            "type": "markdown",
+            "id": "b2c3d4e5f6071829",
+            "text": "For a **guided lesson** (not a drill bank), put one annotated PGN after `PUZZLE`. The main line is the solution; `{comments}` praise correct moves; parenthesized **variations** are soft coaches — play that try, see the comment, board undoes, keep solving. Use `[FEN]`/`[SetUp \"1\"]` so the learner moves first (no Lichess opponent-setup ply). Pair with a `POSITION` story item above for free exploration, then this puzzle to lock the idea."
+          },
+          {
+            "type": "code",
+            "id": "c3d4e5f60718293a",
+            "text": "PUZZLE\n[Event \"How Pieces Capture\"]\n[FEN \"4k3/8/8/8/4b3/8/4Q3/4K3 w - - 0 1\"]\n[SetUp \"1\"]\n\n1. Qxe4 {Capture replaces the enemy piece on its square.} (1. Qe3 {Safe, but you left free material — take on e4.}) *",
+            "language": "text"
+          },
+          {
+            "type": "pagefold",
+            "id": "7c1e0b9a4d6f2358",
+            "text": "SURVEY"
+          },
+          {
+            "type": "markdown",
+            "id": "293a4b5c6d7e8f90",
+            "text": "Bare `SURVEY` on [[My Chess Games]] opens the site survey (rated and unrated games, active games, open challenges). Open challenges live on the SURVEY item's metadata — not as sibling chess items on the page."
+          },
+          {
+            "type": "chess",
+            "id": "f3e7a1c9b0d24856",
+            "text": "SURVEY"
+          },
+          {
+            "type": "pagefold",
+            "id": "8d2f1a0c7b3e4591",
+            "text": "LEADERBOARD"
+          },
+          {
+            "type": "markdown",
+            "id": "9e3a2b1c0d4f5678",
+            "text": "On [[Chess Leaderboards]] (`chess-leaderboards`). Opens the federated Glicko-2 rankings view. Checkpoint and blocklist data are kept in hidden page metadata; the visible story holds the keyword item and an editable trusted-peers roster."
+          },
+          {
+            "type": "chess",
+            "id": "b2c3d4e5f6789012",
+            "text": "LEADERBOARD"
+          }
+        ]
+      },
+      "date": 1783052203000
     }
   ]
 }

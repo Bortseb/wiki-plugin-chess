@@ -46,6 +46,16 @@ describe('guards · chess-app', () => {
     )
   })
 
+  it('iframe Switch Game Mode offers change-this-item or open-new-page', () => {
+    const src = fs.readFileSync(path.join(root, 'src/choose-menu.js'), 'utf8')
+    assert.match(src, /export function switchGameModeFromGame\(\)/)
+    assert.match(src, /canSpawnLineupGhostPage/)
+    assert.match(src, /label:\s*'Open new page'/)
+    assert.match(src, /alwaysConfirm:\s*true/)
+    assert.match(src, /confirmLabelRated:\s*'Resign & switch'/)
+    assert.match(src, /onProceed:\s*\(\)\s*=>\s*proceedReturnToStartMenu\(\)/)
+  })
+
   it('defines player bar HTML helpers in game.js view layer', () => {
     const src = fs.readFileSync(path.join(root, 'src/game.js'), 'utf8')
     const app = fs.readFileSync(chessAppSourcePath, 'utf8')

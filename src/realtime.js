@@ -341,7 +341,7 @@ export function updateRemoteWatch() {
   const host = remoteOpponentSite()
   if (host === lastWatchedRemoteSite) return
   lastWatchedRemoteSite = host
-  shellMessenger()?.remoteWatch({ host: host || null })
+  shellMessenger()?.remoteWatch({ site: host || null })
 }
 
 function localSeatKey() {
@@ -1027,7 +1027,7 @@ function acceptRemoteGameEnd() {
   }
   // Page fork only — do not animate first (that autosaves and races the journal put).
   // expectText: wait until the opponent's wiki JSON matches (RTC can beat their autosave).
-  shellMessenger()?.forkRemotePage({ host: forkSite, expectText: text })
+  shellMessenger()?.forkRemotePage({ site: forkSite, expectText: text })
   window.setTimeout(() => {
     remotePageForkInFlight = false
   }, 12000)
@@ -1159,7 +1159,7 @@ function acceptRemoteMove() {
   // Journal source of truth is the wiki page fork (no pre-animate autosave race).
   // Pass expectText so the shell retries GET until the opponent's wiki has this PGN
   // (real-time can deliver the move before their journal put finishes).
-  shellMessenger()?.forkRemotePage({ host: forkSite, expectText: text })
+  shellMessenger()?.forkRemotePage({ site: forkSite, expectText: text })
   window.setTimeout(() => {
     remotePageForkInFlight = false
   }, 12000)

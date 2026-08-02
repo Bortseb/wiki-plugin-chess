@@ -91,14 +91,14 @@
       }
     </style>
     <link rel="stylesheet" href="./assets/styles/all.min.css" />
-    <link rel="stylesheet" href="./assets/styles/cm-modules.css?v=1.1.2-pre.16+1785042813718" />
-    <link rel="stylesheet" href="./assets/styles/wiki-chess.css?v=1.1.2-pre.16+1785042813718" />
+    <link rel="stylesheet" href="./assets/styles/cm-modules.css?v=1.1.2-pre.16+1785709063624" />
+    <link rel="stylesheet" href="./assets/styles/wiki-chess.css?v=1.1.2-pre.16+1785709063624" />
     <!-- Warm the app + board bundles in parallel: the browser would otherwise not
        discover cm-modules-bundle.js until chess-app.js is downloaded and parsed
        (a serial round-trip that is very visible on mobile). Hrefs must match the
        stamped import specifier in chess-app.js — build-client.js re-stamps ?v=. -->
-    <link rel="modulepreload" href="./chess-app.js?v=1.1.2-pre.16+1785042813718" />
-    <link rel="modulepreload" href="./cm-modules-bundle.js?v=1.1.2-pre.16+1785042813718" />
+    <link rel="modulepreload" href="./chess-app.js?v=1.1.2-pre.16+1785709063624" />
+    <link rel="modulepreload" href="./cm-modules-bundle.js?v=1.1.2-pre.16+1785709063624" />
     <script type="module">
       // Early PWA boot: protocol guard and install nudge (standalone shell only).
       if (window.parent === window.self) {
@@ -188,12 +188,11 @@
           src="/favicon.png"
           width="48"
           height="48"
-          alt="This wiki's flag — used as the app icon when large enough"
+          alt="This wiki's flag"
           decoding="async" />
         <p class="wiki-chess-install-nudge-text mb-0">
-          Install <strong>Federated Wiki Chess</strong> for offline play. The flag shown here is this wiki's
-          favicon — install uses it as the app icon when it is at least 192×192; otherwise the chess icon is
-          used. Use the install icon in the address bar, or <strong>Install</strong> in the browser menu (⋮).
+          You can optionally install <strong>Federated Wiki Chess</strong> for offline play.
+          Use the install icon in the address bar, or <strong>Install</strong> in the browser menu (⋮).
         </p>
       </div>
       <button
@@ -607,7 +606,7 @@
                         >
                       </div>
                       <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
-                        Legacy DOM helper required by Bootstrap’s JavaScript bundle in the chess app shell.
+                        DOM helper required by Bootstrap’s JavaScript bundle in the chess app shell.
                       </p>
                     </li>
                     <li class="wiki-chess-thanks-entry">
@@ -628,7 +627,7 @@
                         >
                       </div>
                       <p class="wiki-chess-thanks-line wiki-chess-thanks-line-desc mb-0">
-                        Import-map and ES module compatibility shim for loading the chess app in older browsers.
+                        Import-map and ES module loader for the chess app shell.
                       </p>
                     </li>
                     <li class="wiki-chess-thanks-entry">
@@ -2121,6 +2120,14 @@
             hidden>
             <i class="fas fa-user-plus fa-fw" aria-hidden="true"></i> Add my opponents to neighbourhood
           </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-success wiki-chess-action-btn wiki-chess-lb-add-peers"
+            id="wikiChessLbAddPeers"
+            title="Register farm peers from the Present plugin as wiki neighbours"
+            hidden>
+            <i class="fas fa-sitemap fa-fw" aria-hidden="true"></i> Add peers to neighbourhood
+          </button>
           <div class="wiki-chess-lb-divider" role="presentation" aria-hidden="true"></div>
         </div>
         <!-- Results zone: loading spinner applies to #wikiChessLbStatus only — the toolbar
@@ -2449,15 +2456,9 @@
                   autocomplete="off" />
               </div>
             </div>
-            <div class="mb-3 form-check" id="positionChallengeAllowGuestsWrap">
-              <input class="form-check-input" type="checkbox" id="positionChallengeAllowGuests" checked />
-              <label class="form-check-label" for="positionChallengeAllowGuests">
-                Allow unauthenticated guests to join
-              </label>
-            </div>
             <p class="small text-muted mb-0">
               Leave a rating blank for no limit. Opponents whose rating falls outside the range can view the game but
-              can't join. Rated challenges are always wiki-owners only (guests cannot join).
+              can't join. Open challenges are for signed-in wiki owners only.
             </p>
           </div>
           <p class="small text-muted mb-0 wiki-fen-human-hint" id="positionHumanHint" hidden></p>
@@ -2488,6 +2489,6 @@
     <script src="./assets/js/jquery-3.3.1.slim.min.js"></script>
     <script src="./assets/js/bootstrap-auto-dark-mode.js"></script>
     <script src="./assets/js/es-module-shims.min.js"></script>
-    <script type="module" src="./chess-app.js?v=1.1.2-pre.16+1785042813718"></script>
+    <script type="module" src="./chess-app.js?v=1.1.2-pre.16+1785709063624"></script>
   </body>
 </html>

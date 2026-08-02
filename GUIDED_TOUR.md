@@ -122,7 +122,7 @@ The shell plugin runs inside the Federated Wiki page. Its file header lists four
 
 The shell bundle is built to `client/chess.js`. It **never** imports `cm-modules-bundle.js` (the heavy board UI). That keeps wiki pages lean.
 
-**Shell-only rule:** all cross-wiki HTTP goes through `createBrowserWikiSiteClient` in [federation.js](./src/federation.js#L4721). The app sends semantic requests (`wiki.buildLeaderboard`, etc.); the shell performs the fetch.
+**Shell-only rule:** all cross-wiki HTTP goes through `createBrowserWikiSiteClient` in [federation.js](./src/federation.js#L5557). The app sends semantic requests (`wiki.buildLeaderboard`, etc.); the shell performs the fetch.
 
 ### Runtime 2 — Chess app (`chess-app.js` + submodules)
 
@@ -159,7 +159,7 @@ Two optional server modules extend the farm:
 | Module                                               | Role                                                                                                              |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | [server/puzzle-server.js](./server/puzzle-server.js) | Shared Lichess puzzle database on disk; `/plugin/chess/puzzle` draw API                                           |
-| [server/pwa-bridge.js](./server/pwa-bridge.js)       | HTTP bridge when the installed PWA has no wiki iframe parent ([pwa-bridge.js: header](./server/pwa-bridge.js#L1)) |
+| [server/pwa-bridge.js](./server/pwa-bridge.js)       | Same-origin HTTP bridge when there is no wiki iframe/opener (installed PWA + direct `/plugins/chess/` tab) ([pwa-bridge.js: header](./server/pwa-bridge.js#L1)) |
 
 The PWA bridge exposes a Node counterpart to the browser site client: `createPwaBridgeSiteClient` vs `createBrowserWikiSiteClient`. Same reducer and journal semantics; different transport.
 
@@ -524,6 +524,8 @@ Each player owns a **fork** on their wiki. The shell on Bob's browser fetches Al
 
 When [handleRemoteOpponentState](./src/realtime.js#L1041) detects a legal continuation ahead of local ply, the app may show a modal: accept the opponent's move into your fork, or dismiss and keep editing locally. Auto-accept paths ([maybeAutoAcceptPendingRemoteMove](./src/realtime.js#L1108)) apply only when product rules deem the merge safe — e.g. strict continuation with no local uncommitted edits.
 
+Accepting (**Fork Move** or auto-fork) asks the shell to page-fork the opponent's public copy ([forkRemoteOpponentPage](./src/chess.js) via `MSG.FORK_REMOTE_PAGE`). After the journal put succeeds, the shell must assign [mergeItemTextIntoChessObj](./src/chess-core.js)'s return value into `ctx.chessObj` before `SET_STATE` — that helper returns a new object and does not mutate in place. Then [applySyncedPosition](./src/realtime.js) updates the board without a full page refresh.
+
 Game-end detection ([classifyRemoteGameEnd](./src/realtime.js#L220)) follows the same pattern: remote `Result` tag may arrive before the local board shows checkmate.
 
 ---
@@ -542,20 +544,20 @@ Flat Elo assumes frequent, evenly-matched games against a central pool. Federati
 | `rd`           | Rating deviation — uncertainty; high RD → provisional `?` marker |
 | `sigma` (`σ`)  | Volatility — how erratic results are expected to be              |
 
-Constants and the scale conversion live in [federation.js: §1 Glicko-2](./src/federation.js#L79). The update pipeline is [updateRatingState](./src/federation.js#L328) (batch opponent updates with decay) and [rateGame](./src/federation.js#L408) (one finished human game, both seats).
+Constants and the scale conversion live in [federation.js: §1 Glicko-2](./src/federation.js#L79). The update pipeline is [updateRatingState](./src/federation.js#L330) (batch opponent updates with decay) and [rateGame](./src/federation.js#L410) (one finished human game, both seats).
 
-**Sparse-play decay.** Real time matters: [decayRatingState](./src/federation.js#L273) inflates RD per whole [RATING_PERIOD_MS](./src/federation.js#L114) week of inactivity so long gaps do not over-trust stale numbers.
+**Sparse-play decay.** Real time matters: [decayRatingState](./src/federation.js#L275) inflates RD per whole [RATING_PERIOD_MS](./src/federation.js#L116) week of inactivity so long gaps do not over-trust stale numbers.
 
-**Batched timeline replay.** Federation recomputation does not update after every single verified game in isolation. [replayEventsOntoPlayersBatched](./src/federation.js#L4128) groups verified events into Glicko "periods" — a batch closes when [shouldCloseGlickoBatch](./src/federation.js#L4090) sees a seven-day gap or 15 games plus a new calendar day ([GLICKO_BATCH_GAME_LIMIT](./src/federation.js#L117)). Deep recomputation can run off the main thread via [glicko-worker.js](./src/glicko-worker.js).
+**Batched timeline replay.** Federation recomputation does not update after every single verified game in isolation. [replayEventsOntoPlayersBatched](./src/federation.js#L4378) groups verified events into Glicko "periods" — a batch closes when [shouldCloseGlickoBatch](./src/federation.js#L4340) sees a seven-day gap or 15 games plus a new calendar day ([GLICKO_BATCH_GAME_LIMIT](./src/federation.js#L119)). Deep recomputation can run off the main thread via [glicko-worker.js](./src/glicko-worker.js).
 
-**Why batching rules matter.** Glicko-2 treats every game inside one batch as occurring _simultaneously_ — one rating period, one simultaneous update per player ([applyGlickoBatchToPlayers](./src/federation.js#L4103)). Closing a batch on game count alone, without the calendar-day guard, would split a single-day streak across multiple batches and artificially collapse Rating Deviation (RD), breaking the ranking math. The 15-game cap therefore only closes a batch when the _next_ event falls on a different UTC calendar day than the last game already in the batch.
+**Why batching rules matter.** Glicko-2 treats every game inside one batch as occurring _simultaneously_ — one rating period, one simultaneous update per player ([applyGlickoBatchToPlayers](./src/federation.js#L4353)). Closing a batch on game count alone, without the calendar-day guard, would split a single-day streak across multiple batches and artificially collapse Rating Deviation (RD), breaking the ranking math. The 15-game cap therefore only closes a batch when the _next_ event falls on a different UTC calendar day than the last game already in the batch.
 
 **Auditable PGN tags.** A rated game is a self-contained rating event. On finalize, [buildGlickoTags](./src/federation.js#L477) stamps pre-game state into the PGN:
 
 - `[Rated] yes`
 - `[WhiteGlickoRating]`, `[WhiteGlickoRD]`, `[WhiteGlickoVolatility]` (and Black counterparts)
 
-[readGlickoState](./src/federation.js#L496) recovers `{ r, RD, σ }` from tags when crawling peer wikis. These are **not** legacy `WhiteElo` tags — federation math is Glicko-native end to end.
+[readGlickoState](./src/federation.js#L496) recovers `{ r, RD, σ }` from Glicko tags when crawling peer wikis. Federation math is Glicko-native end to end (`WhiteElo` / `BlackElo` are Stockfish UCI strength only).
 
 **Provisional vs reliable.** [isProvisional](./src/federation.js) is true while RD exceeds [PROVISIONAL_RD](./src/federation.js) (110). [isReliable](./src/federation.js) is the complement; the leaderboard "established only" filter uses it.
 
@@ -567,15 +569,16 @@ Constants and the scale conversion live in [federation.js: §1 Glicko-2](./src/f
 
 The **My Chess Games** page ([pages/my-chess-games](./pages/my-chess-games)) carries a bare `SURVEY` chess item. That keyword alone tells the plugin to open the site survey UI — a lobby for your games, opponents, and open seeks discovered by crawl. The visible item text stays the static keyword; rich metadata attaches to the item and to `page.chess`, not to a growing PGN in the story.
 
-**Game catalog (`page.chess.gameIndex`).** Journal saves (and league seed) upsert each local game into a metadata-only catalog on My Chess Games — refs + content hashes, never full PGNs ([readGameIndex](./src/federation.js#L728), [buildGameIndexEntryFromPgn](./src/federation.js#L761), [upsertGameIndexEntry](./src/federation.js#L829), [applyGameIndexToSurveyPage](./src/federation.js#L856); shell publish in [chess.js](./src/chess.js)). Site and federation game crawls read that catalog instead of sitemap-fanout for games, so discovery stays cheap as a farm grows.
+**Game catalog (`page.chess.gameIndex`).** Journal saves (and league seed) upsert each local game into a metadata-only catalog on My Chess Games — refs + content hashes, never full PGNs ([readGameIndex](./src/federation.js#L789), [buildGameIndexEntryFromPgn](./src/federation.js#L822), [upsertGameIndexEntry](./src/federation.js#L890), [applyGameIndexToSurveyPage](./src/federation.js#L917); shell publish in [chess.js](./src/chess.js)). Site and federation game crawls read that catalog instead of sitemap-fanout for games, so discovery stays cheap as a farm grows. If on-disk catalog rows are unreadable (wrong field names), [gameIndexHasUnreadableEntries](./src/federation.js#L702) forces a one-shot sitemap rebuild so Active Games stay honest.
 
 | Concept                             | Where it lives                                                                                               |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Survey keyword & page slug          | [SURVEY_PAGE_SLUG](./src/federation.js#L2753), [SURVEY_PAGE_STORY](./src/federation.js#L3008)                |
-| Site game discovery (fast path)     | Shell/PWA crawl via [buildSiteSurveyAsync](./src/federation.js#L6378) (`includeFederationChallenges: false`) |
-| Deferred enrich + open challenges   | [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6303) — shared by shell and PWA bridge              |
-| Per-site survey view                | [survey.js §3](./src/survey.js#L1007) (`viewKind: 'siteSurvey'`)                                                |
-| Open-challenge index on SURVEY item | `openChallenges` array on the chess item ([openChallengeSurveyRecord](./src/federation.js#L2659))            |
+| Survey keyword & page slug          | [SURVEY_PAGE_SLUG](./src/federation.js#L2946), [SURVEY_PAGE_STORY](./src/federation.js#L3258)                |
+| Site game discovery (fast path)     | Shell/PWA crawl via [buildSiteSurveyAsync](./src/federation.js#L6737) (`includeFederationChallenges: false`) |
+| Deferred enrich + open challenges   | [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6660) — shared by shell and PWA bridge              |
+| Per-site survey view                | [survey.js §3](./src/survey.js#L6) (`viewKind: 'siteSurvey'`)                                                |
+| Open-challenge index on page charm  | `page.chess.openChallenges` ([openChallengeSurveyRecord](./src/federation.js#L2811), [syncOpenChallengeSurveyOnPage](./src/federation.js#L5345)) |
+| Farm-peer roster (browser)          | wiki-plugin-present [`GET /plugin/present/roll`](./src/federation.js#L3107) → [fetchFarmPeerSites](./src/federation.js#L3117) |
 
 **Opt-in without a keyword.** Publishing any **rated** human game opts the site into federated leaderboards — no separate "join league" keyword is required ([federation.js: SURVEY page comment](./src/federation.js#L634)).
 
@@ -583,57 +586,57 @@ The **My Chess Games** page ([pages/my-chess-games](./pages/my-chess-games)) car
 
 **Starting rating.** Every new player starts at the neutral prior (`r = 1500`, max RD) via [newRatingState](./src/federation.js). There is no self-estimate UI and no Stockfish/puzzle seeding of the federated rating. If the local store is empty but published rated games exist, discovery adopts that history instead.
 
-**Fast sync loop.** [survey.js](./src/survey.js) runs a periodic soft sync ([FAST_SYNC_INTERVAL_MS](./src/federation.js#L619), five minutes) to refresh the visible-federation view from trusted checkpoints when stale. When checkpoint gossip diverges or no supermajority exists, the engine returns local IndexedDB ratings unchanged and sets `queueAudit: true`; [handleLeaderboardData](./src/survey.js#L1502) then triggers a **background audit** (`deepRecompute: true`, `background: true`) without clearing the board. There is no user-facing audit button — reconciliation is silent.
+**Fast sync loop.** [survey.js](./src/survey.js) runs a periodic soft sync ([FAST_SYNC_INTERVAL_MS](./src/federation.js#L621), five minutes) to refresh the visible-federation view from trusted checkpoints when stale. When checkpoint gossip diverges or no supermajority exists, the engine returns local IndexedDB ratings unchanged and sets `queueAudit: true`; [handleLeaderboardData](./src/survey.js#L1517) then triggers a **background audit** (`deepRecompute: true`, `background: true`) without clearing the board. There is no user-facing audit button — reconciliation is silent.
 
-**Site-survey deferred work.** A site survey paints quickly: the fast path returns local games with `openChallengesPending` / `siteGamesEnrichmentPending`, and keeps the page snapshot in `meta.games`. [beginDeferredSiteSurveyWork](./src/survey.js#L1671) then asks the shell (or PWA bridge) for federation open seeks and twin-enriched games via `wiki.buildChallenges({ forSiteSurvey: true })` and `wiki.enrichSiteSurvey`. Enrich passes that snapshot as `crawledGames` on `MSG.BUILD_SITE_SURVEY_ENRICH` so [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6303) can skip a second `crawlSiteGamePagesAsync`. Both wiki embed and installed PWA share that orchestrator (shell handler and PWA bridge).
+**Site-survey deferred work.** A site survey paints quickly: the fast path returns local games with `openChallengesPending` / `siteGamesEnrichmentPending`, and keeps the page snapshot in `meta.games`. [beginDeferredSiteSurveyWork](./src/survey.js#L1686) then asks the shell (or PWA bridge) for federation open seeks and twin-enriched games via `wiki.buildChallenges({ forSiteSurvey: true })` and `wiki.enrichSiteSurvey`. Before that request, the **browser** warms local-farm peers with [fetchFarmPeerSites](./src/federation.js#L3117) (present roll) and passes them as `farmPeerSites` on the challenge job — see [Discovery seeds](#open-challenges). Enrich passes the fast-path snapshot as `crawledGames` on `MSG.BUILD_SITE_SURVEY_ENRICH` so [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6660) can skip a second `crawlSiteGamePagesAsync`. Both wiki embed and installed PWA share that orchestrator (shell handler and PWA bridge).
 
-**Local blockList.** Neighborhood filters are surgical and per-node, never gossiped. IndexedDB `meta` holds `blockList` (sites muted from fetch/replay), `deletionMetrics` (deletion-ratio tracking), `island` (graph health), `federationSites` (hosts that answered SURVEY-page probes), and `siteCrawlCache` (per-host sitemap + games snapshot used to skip repeat page fetches — [normalizeSiteCrawlCache](./src/federation.js#L4691)). None of that meta is gossiped. There is no manual mute UI — sites enter `blockList` through silent [deletion-ratio auto-block](#twin-verification-and-audits) ([applyDeletionRatioMetrics](./src/federation.js#L1328)). [federationIndexedDbPayload](./src/survey.js#L285) attaches that meta to neighborhood fetch requests. The wiki shell forwards it into `runNeighborhoodJob`; the installed PWA does the same through [federationIndexedDbOptsFromPayload](./server/pwa-bridge.js#L48) on `/dispatch` and REST leaderboard.
+**Local blockList.** Neighborhood filters are surgical and per-node, never gossiped. IndexedDB `meta` holds `blockList` (sites muted from fetch/replay), `deletionMetrics` (deletion-ratio tracking), `island` (graph health), `federationSites` (hosts that answered SURVEY-page probes), and `siteCrawlCache` (per-host sitemap + games snapshot used to skip repeat page fetches — [normalizeSiteCrawlCache](./src/federation.js#L4941)). None of that meta is gossiped. There is no manual mute UI — sites enter `blockList` through silent [deletion-ratio auto-block](#twin-verification-and-audits) ([applyDeletionRatioMetrics](./src/federation.js#L1417)). [federationIndexedDbPayload](./src/survey.js#L290) attaches that meta to neighborhood fetch requests. The wiki shell forwards it into `runNeighborhoodJob`; the installed PWA does the same through [federationIndexedDbOptsFromPayload](./server/pwa-bridge.js#L48) on `/dispatch` and REST leaderboard.
 
 ### Twin verification and audits
 
 Cross-wiki games exist as **twins** — the same game forked onto both players' sites as independent PGN records. Because no central server arbitrates results, federation treats ratings like double-entry bookkeeping: a number counts only when both ledgers reconcile.
 
-**Core audit.** [auditTwins](./src/federation.js#L1496) compares local and remote copies:
+**Core audit.** [auditTwins](./src/federation.js#L1594) compares local and remote copies:
 
-1. [gameFingerprint](./src/federation.js#L1441) must match (sorted player hosts + game id/event/date).
-2. [compareGameRecords](./src/federation.js#L1454) checks move-for-move SAN equality and terminal tags (`Result`, `Termination`).
-3. [replayLegal](./src/federation.js#L1483) validates both records with cm-pgn.
+1. [gameFingerprint](./src/federation.js#L1539) must match (sorted player hosts + game id/event/date).
+2. [compareGameRecords](./src/federation.js#L1552) checks move-for-move SAN equality and terminal tags (`Result`, `Termination`).
+3. [replayLegal](./src/federation.js#L1581) validates both records with cm-pgn.
 
 A one-sided publish (twin not crawled yet) fails closed — `verified: false`, reason `no twin / one-sided`.
 
-**Verified timeline.** [collectVerifiedTimelineEvents](./src/federation.js#L4047) walks a crawled game pool, keeps only rated finished games with a reconciling twin ([hasVerifiedTwin](./src/federation.js#L3974)), drops sites via [isSiteBlocked](./src/federation.js#L1256) / local `blockList` (surgical filter — not gossiped), and sorts by [readGameTimelineKey](./src/federation.js#L1140) (`TerminationTimestamp` + `GameHash`). That ordered event list feeds Glicko replay and checkpoint cursors.
+**Verified timeline.** [collectVerifiedTimelineEvents](./src/federation.js#L4297) walks a crawled game pool, keeps only rated finished games with a reconciling twin ([hasVerifiedTwin](./src/federation.js#L4224)), drops sites via [isSiteBlocked](./src/federation.js#L1345) / local `blockList` (surgical filter — not gossiped), and sorts by [readGameTimelineKey](./src/federation.js#L1229) (`TerminationTimestamp` + `GameHash`). That ordered event list feeds Glicko replay and checkpoint cursors.
 
-**Missing-twin soft audit.** When a peer site is up but the expected twin PGN is absent, [detectMissingTwinFinding](./src/federation.js#L1529) records a `missing-twin` finding. Owners can also stamp an explicit `PeerMissing` tag ([readPeerMissingPgnTag](./src/chess-core.js#L2949)). [collectMissingTwinFindings](./src/federation.js#L1565) and [missingTwinFindingsFromPool](./src/federation.js#L1606) aggregate these across crawls.
+**Missing-twin soft audit.** When a peer site is up but the expected twin PGN is absent, [detectMissingTwinFinding](./src/federation.js#L1627) records a `missing-twin` finding. Owners can also stamp an explicit `PeerMissing` tag ([readPeerMissingPgnTag](./src/chess-core.js#L2969)). [collectMissingTwinFindings](./src/federation.js#L1663) and [missingTwinFindingsFromPool](./src/federation.js#L1704) aggregate these across crawls.
 
-**Deletion-ratio auto-block.** Repeated missing twins on _local losses_ feed [applyDeletionRatioMetrics](./src/federation.js#L1328). When the ratio of missing twins to expected losses exceeds [DELETION_RATIO_THRESHOLD](./src/federation.js#L120) (with [DELETION_MIN_SAMPLE](./src/federation.js#L122) games), the peer is silently added to the local `blockList` — a defensive signal that someone may be deleting unfavorable twins. **There is no user notification** for this auto-block; it is entirely local and invisible to the blocked peer.
+**Deletion-ratio auto-block.** Repeated missing twins on _local losses_ feed [applyDeletionRatioMetrics](./src/federation.js#L1417). When the ratio of missing twins to expected losses exceeds [DELETION_RATIO_THRESHOLD](./src/federation.js#L120) (with [DELETION_MIN_SAMPLE](./src/federation.js#L122) games), the peer is silently added to the local `blockList` — a defensive signal that someone may be deleting unfavorable twins. **There is no user notification** for this auto-block; it is entirely local and invisible to the blocked peer.
 
-**Open-challenge filtering.** [filterOpenChallengesByBlockList](./src/federation.js#L1267) drops open seeks whose site or challenge seats match the local `blockList` before the lobby UI partitions joinable vs own seeks.
+**Open-challenge filtering.** [filterOpenChallengesByBlockList](./src/federation.js#L1356) drops open seeks whose site or challenge seats match the local `blockList` before the lobby UI partitions joinable vs own seeks.
 
-**Sync pending from twin.** Correspondence players may lag on `Result`. [syncPendingFromTwin](./src/federation.js#L3384) detects when the local copy is still `*` but a verified twin already shows a decisive result with a matching move prefix — a prompt to import the finished line.
+**Sync pending from twin.** Correspondence players may lag on `Result`. [syncPendingFromTwin](./src/federation.js#L3634) detects when the local copy is still `*` but a verified twin already shows a decisive result with a matching move prefix — a prompt to import the finished line.
 
 ### Leaderboards & federation consensus
 
-The **Chess Leaderboards** page ([pages/chess-leaderboards](./pages/chess-leaderboards)) carries a bare `LEADERBOARD` item plus intro copy. Federation gossip (`checkpoint`, `trustedPeers`) lives in hidden `page.chess` JSON on that page — not in visible story blocks ([readFederationCharm](./src/federation.js#L993), [reviseChessCharmOnPage](./src/federation.js#L1045)). Checkpoints may carry an optional `island_id` (root orphan hash) inside the checkpoint object.
+The **Chess Leaderboards** page ([pages/chess-leaderboards](./pages/chess-leaderboards)) carries a bare `LEADERBOARD` item plus intro copy. Federation gossip (`checkpoint`, `trustedPeers`) lives in hidden `page.chess` JSON on that page — not in visible story blocks ([readFederationCharm](./src/federation.js#L1066), [reviseChessCharmOnPage](./src/federation.js#L1122)). Checkpoints may carry an optional `island_id` (root orphan hash) inside the checkpoint object.
 
 **Neighborhood fetch entry points.** Shell async fetchers in [federation.js](./src/federation.js) include:
 
 | Helper                                                         | Role                                                                     |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| [fetchSiteContentAsync](./src/federation.js#L5340)             | Load chess content from one site                                         |
-| [fetchSitesAsync](./src/federation.js#L5491)                   | Load chess content from a list of sites                                  |
-| [buildLeaderboardAsync](./src/federation.js#L6676)             | Federated rank rebuild (mine / neighborhood / survey modes)              |
-| [buildSiteSurveyAsync](./src/federation.js#L6378)              | Per-site game harvest for SURVEY view (fast path)                        |
-| [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6303) | Deferred twin enrich + federation open challenges (`crawledGames` reuse) |
-| [consensusFromNetwork](./src/federation.js#L5886)              | Primary neighborhood orchestrator (lazy vs audit paths)                  |
-| [runNeighborhoodJob](./src/federation.js#L6830)                | Unified job entry used by shell postMessage and PWA bridge               |
+| [fetchSiteContentAsync](./src/federation.js#L5627)             | Load chess content from one site                                         |
+| [fetchSitesAsync](./src/federation.js#L5778)                   | Load chess content from a list of sites                                  |
+| [buildLeaderboardAsync](./src/federation.js#L7054)             | Federated rank rebuild (mine / neighborhood / survey modes)              |
+| [buildSiteSurveyAsync](./src/federation.js#L6737)              | Per-site game harvest for SURVEY view (fast path)                        |
+| [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6660) | Deferred twin enrich + federation open challenges (`crawledGames` reuse) |
+| [consensusFromNetwork](./src/federation.js#L6243)              | Primary neighborhood orchestrator (lazy vs audit paths)                  |
+| [runNeighborhoodJob](./src/federation.js#L7208)                | Unified job entry used by shell postMessage and PWA bridge               |
 
-The app triggers these via `wiki.buildLeaderboard` / `wiki.crawlUi`; results return to [survey.js §3](./src/survey.js#L1007).
+The app triggers these via `wiki.buildLeaderboard` / `wiki.crawlUi`; results return to [survey.js §3](./src/survey.js#L6).
 
-**Choice A — Lazy (performance path).** When local IndexedDB already holds a checkpoint and player map, [consensusFromNetwork](./src/federation.js#L5886) reads peer hubs for checkpoint gossip only — it **never renders peer-computed player maps**. If a ≥66% supermajority among [trustedPeers](./src/federation.js#L1182) agrees on a hash **and** `localHash === acceptedHash`, the engine does an incremental crawl after `last_timeline_key` with `expandGraph: false` when the cursor is unchanged. **Guardrail:** if there is no supermajority or the local hash differs from the accepted hash, the pass returns **local IndexedDB players unchanged** with `queueAudit: true` — no crawl or recompute in that pass.
+**Choice A — Lazy (performance path).** When local IndexedDB already holds a checkpoint and player map, [consensusFromNetwork](./src/federation.js#L6243) reads peer hubs for checkpoint gossip only — it **never renders peer-computed player maps**. If a ≥66% supermajority among [trustedPeers](./src/federation.js#L1271) agrees on a hash **and** `localHash === acceptedHash`, the engine does an incremental crawl after `last_timeline_key` with `expandGraph: false` when the cursor is unchanged. **Guardrail:** if there is no supermajority or the local hash differs from the accepted hash, the pass returns **local IndexedDB players unchanged** with `queueAudit: true` — no crawl or recompute in that pass.
 
-**Choice B — Audit (truth path).** A full opponent-graph BFS crawl ([fetchFederationGamesAsync](./src/federation.js#L5506): seeds → rated opponents, bounded by `blockList` — not hop decay) plus [replayEventsOntoPlayersBatched](./src/federation.js#L4128) recomputes ratings from raw twin-verified PGNs. Triggered by background `queueAudit`, empty IndexedDB, the fast-sync hook after enough new verified games, or explicit `deepRecompute`. On completion, gossip publishes a checkpoint snapshot (`state_hash`, cursors, optional `island_id`) via [shouldPublishFederationGossip](./src/federation.js#L1017).
+**Choice B — Audit (truth path).** A full opponent-graph BFS crawl ([fetchFederationGamesAsync](./src/federation.js#L5793): seeds → rated opponents, bounded by `blockList` — not hop decay) plus [replayEventsOntoPlayersBatched](./src/federation.js#L4378) recomputes ratings from raw twin-verified PGNs. Triggered by background `queueAudit`, empty IndexedDB, the fast-sync hook after enough new verified games, or explicit `deepRecompute`. On completion, gossip publishes a checkpoint snapshot (`state_hash`, cursors, optional `island_id`) via [shouldPublishFederationGossip](./src/federation.js#L1090).
 
-**Consensus mode labels.** [runFederationConsensus](./src/federation.js#L4338) / [runFederationConsensusAsync](./src/federation.js#L4424) label the result of a crawl/replay pass:
+**Consensus mode labels.** [runFederationConsensus](./src/federation.js#L4588) / [runFederationConsensusAsync](./src/federation.js#L4674) label the result of a crawl/replay pass:
 
 | Mode         | Meaning                                                                                          |
 | ------------ | ------------------------------------------------------------------------------------------------ |
@@ -641,13 +644,13 @@ The app triggers these via `wiki.buildLeaderboard` / `wiki.crawlUi`; results ret
 | `checkpoint` | Incremental timeline apply from cursor, or idle local state still current                        |
 | `audit`      | Full batched Glicko replay from verified twins; gossip may need publishing                       |
 
-[finalizeDeepConsensusResult](./src/federation.js#L4322) picks `checkpoint` vs `audit` after a full replay by comparing peer [checkpoint supermajority](./src/federation.js#L1212) against the recomputed [state hash](./src/federation.js#L1203). When peers disagree or no supermajority exists, `queueAudit: true` schedules a background audit pass — divergence means this node silently keeps its last-known IndexedDB state until a deterministic local audit completes.
+[finalizeDeepConsensusResult](./src/federation.js#L4572) picks `checkpoint` vs `audit` after a full replay by comparing peer [checkpoint supermajority](./src/federation.js#L1301) against the recomputed [state hash](./src/federation.js#L1292). When peers disagree or no supermajority exists, `queueAudit: true` schedules a background audit pass — divergence means this node silently keeps its last-known IndexedDB state until a deterministic local audit completes.
 
-**Checkpoints & gossip.** Published checkpoints carry `state_hash`, `last_timeline_key`, `last_processed_game_hash`, and optional `island_id`. [shouldPublishFederationGossip](./src/federation.js#L1017) writes gossip only when the checkpoint or trusted-peer fingerprint changes (no min-new-games gate).
+**Checkpoints & gossip.** Published checkpoints carry `state_hash`, `last_timeline_key`, `last_processed_game_hash`, and optional `island_id`. [shouldPublishFederationGossip](./src/federation.js#L1090) writes gossip only when the checkpoint or trusted-peer fingerprint changes (no min-new-games gate).
 
-**Island health.** [computeIslandState](./src/federation.js#L1295) tracks federation graph health — `connected`, `isolated`, or `shifted` when player count contracts sharply ([ISLAND_CONTRACTION_RATIO](./src/federation.js#L125)) or the root orphan hash changes.
+**Island health.** [computeIslandState](./src/federation.js#L1384) tracks federation graph health — `connected`, `isolated`, or `shifted` when player count contracts sharply ([ISLAND_CONTRACTION_RATIO](./src/federation.js#L127)) or the root orphan hash changes.
 
-**Leaderboard rendering.** [buildLeaderboardFromPlayers](./src/federation.js#L4474) turns the consensus player map into sortable rows. Columns are defined in [LEADERBOARD_COLUMNS](./src/federation.js#L3743) (rating, games, color splits, win rate with [WINRATE_MIN_GAMES](./src/federation.js#L3841) floor). [rankLeaderboard](./src/federation.js#L3926) sorts/filters; [filterFederatedLeaderboardEntries](./src/federation.js#L3248) applies view modes without recomputing ratings:
+**Leaderboard rendering.** [buildLeaderboardFromPlayers](./src/federation.js#L4724) turns the consensus player map into sortable rows. Columns are defined in [LEADERBOARD_COLUMNS](./src/federation.js#L3993) (rating, games, color splits, win rate with [WINRATE_MIN_GAMES](./src/federation.js#L4091) floor). [rankLeaderboard](./src/federation.js#L4176) sorts/filters; [filterFederatedLeaderboardEntries](./src/federation.js#L3498) applies view modes without recomputing ratings:
 
 | Mode           | Filter                               |
 | -------------- | ------------------------------------ |
@@ -655,29 +658,31 @@ The app triggers these via `wiki.buildLeaderboard` / `wiki.crawlUi`; results ret
 | `mine`         | Local host + past opponents          |
 | `neighborhood` | Local + neighborhood hosts/opponents |
 
-[survey.js](./src/survey.js) caches survey-mode results in `lbBoardCache` and can [primeBoardFromIndexedDb](./src/survey.js#L1911) for instant paint before the first crawl returns.
+[survey.js](./src/survey.js) caches survey-mode results in `lbBoardCache` and can [primeBoardFromIndexedDb](./src/survey.js#L1935) for instant paint before the first crawl returns.
 
-**Passive federation UI.** During background refresh the board stays visible (cache-first). A small **Updating…** indicator (`#wikiChessLbUpdating`, [renderLbUpdating](./src/leaderboard.js#L581)) appears while `lbLoading && lbBackground`. Verbose crawl progress (wave/host/event counts) is intentionally hidden. The former audit-confirm modal and button were removed — audits run silently when `queueAudit` fires. Leaving the leaderboard surface ([leaveFederationViews](./src/survey.js#L1792)) closes the gate/modals but **does not** abandon in-flight Visible-federation crawls — late progress still lands in IndexedDB and board caches while the wiki tab stays open.
+**Passive federation UI.** During background refresh the board stays visible (cache-first). A small **Updating…** indicator (`#wikiChessLbUpdating`, [renderLbUpdating](./src/leaderboard.js#L683)) appears while `lbLoading && lbBackground`. Verbose crawl progress (wave/host/event counts) is intentionally hidden. The former audit-confirm modal and button were removed — audits run silently when `queueAudit` fires. Leaving the leaderboard surface ([leaveFederationViews](./src/survey.js#L1816)) closes the gate/modals but **does not** abandon in-flight Visible-federation crawls — late progress still lands in IndexedDB and board caches while the wiki tab stays open.
 
-**Island notice (My Chess Games).** [renderIslandNotice](./src/survey.js#L2453) shows one muted line on the site survey surface (`viewKind: 'siteSurvey'`, all-games probe) only when [shouldShowIslandNotice](./src/federation.js#L1319) agrees — `shifted`, or `isolated` after a previously larger pool (`previousPlayerCount > 2`). Sparse first-contact (`isolated` with a tiny/empty prior pool) is **not** treated as an island and stays silent. The notice dismisses automatically when state returns to `connected`. Deletion-ratio auto-block has **no** UI counterpart.
+**Island notice (My Chess Games).** [renderIslandNotice](./src/survey.js#L2480) shows one muted line on the site survey surface (`viewKind: 'siteSurvey'`, all-games probe) only when [shouldShowIslandNotice](./src/federation.js#L1408) agrees — `shifted`, or `isolated` after a previously larger pool (`previousPlayerCount > 2`). Sparse first-contact (`isolated` with a tiny/empty prior pool) is **not** treated as an island and stays silent. The notice dismisses automatically when state returns to `connected`. Deletion-ratio auto-block has **no** UI counterpart.
 
-**Trusted peers.** Trust is stored in `page.chess.federation.trustedPeers` ([readTrustedPeers](./src/federation.js#L1182)). [applyTrustedPeersToPage](./src/federation.js#L1187) writes peers there and strips any leftover visible roster item from the story. Supermajority consensus only counts checkpoints from listed peers ([checkpointSupermajority](./src/federation.js#L1212), threshold [CONSENSUS_SUPERMAJORITY](./src/federation.js#L618) = 0.66). **Visible-federation** crawls (Chess Leaderboards hop dials) start at the local site and walk rated opponents bounded by `maxHops` / `hopDecay` / [HOP_TRUST_FLOOR](./src/federation.js#L3138) (`trust = decay^hop`). After that graph walk, [consensusFromNetwork](./src/federation.js#L5886) also sitemap-crawls hosts from the global chess-plugin federation search ([CHESS_PLUGIN_INDEX_SEARCH_URL](./src/federation.js#L2795) / [resolveFederationIndexLeafHosts](./src/federation.js#L2971)) as **non-expanding leaves** (`expandGraph: false`) — so published or forked games on indexed farms still enter the pool without treating those hosts as hop-1 BFS seeds. **Audit** crawls omit the hop graph and walk the full opponent graph, filtered only by the local IndexedDB `blockList`.
+**Trusted peers.** Trust is stored in `page.chess.federation.trustedPeers` ([readTrustedPeers](./src/federation.js#L1271)). [applyTrustedPeersToPage](./src/federation.js#L1276) writes peers there. Supermajority consensus only counts checkpoints from listed peers ([checkpointSupermajority](./src/federation.js#L1301), threshold [CONSENSUS_SUPERMAJORITY](./src/federation.js#L620) = 0.66). **Visible-federation** crawls (Chess Leaderboards hop dials) start at the local site and walk rated opponents bounded by `maxHops` / `hopDecay` / [HOP_TRUST_FLOOR](./src/federation.js#L3388) (`trust = decay^hop`). After that graph walk, [consensusFromNetwork](./src/federation.js#L6243) also sitemap-crawls hosts from the global chess-plugin federation search ([CHESS_PLUGIN_INDEX_SEARCH_URL](./src/federation.js#L2988) / [resolveFederationIndexLeafHosts](./src/federation.js#L3221)) as **non-expanding leaves** (`expandGraph: false`) — so published or forked games on indexed farms still enter the pool without treating those hosts as hop-1 BFS seeds. **Audit** crawls omit the hop graph and walk the full opponent graph, filtered only by the local IndexedDB `blockList`. Neighbourhood mode can also **Add peers** ([addFarmPeersToNeighborhood](./src/leaderboard.js#L619)) — registering missing present-roll farm hosts into the curated `wiki.neighborhood` roster, mirroring **Add my opponents**.
 
-**Twin-gated rank.** [recomputeVerifiedRating](./src/federation.js#L3984) excludes one-sided games from federated standing even when local IndexedDB already moved — the ranked board and player-bar "verified" flag both key off twin presence.
+**Twin-gated rank.** [recomputeVerifiedRating](./src/federation.js#L4234) excludes one-sided games from federated standing even when local IndexedDB already moved — the ranked board and player-bar "verified" flag both key off twin presence.
 
 ### Open challenges
 
-Open seeks are **real game pages** with one open seat — not extra chess items cluttering the My Chess Games story. Challenge config is stamped into PGN tags (`ChallengeCreator`, `CreatorColor`, `MinRating`, `MaxRating`, `ChallengeTarget`, `ChallengeTs`, `CreatorRating`, `Rated`, plus casual `AllowGuests`). `ChallengeTarget` is blank/omitted for open federation seeks and set to a wiki host for directed invites.
+Open seeks are **real game pages** with one open seat — not extra chess items cluttering the My Chess Games story. Challenge config is stamped into PGN tags (`ChallengeCreator`, `CreatorColor`, `MinRating`, `MaxRating`, `ChallengeTarget`, `ChallengeTs`, `CreatorRating`, `Rated`). `ChallengeTarget` is blank/omitted for open federation seeks and set to a wiki host for directed invites.
 
-**Who can see / join.** Rated seeks are always wiki-owners only ([challengeJoinGate](./src/federation.js#L1881) / [challengeVisibleToViewer](./src/federation.js#L1893)). Casual seeks stamp `AllowGuests` yes/no; `AllowGuests=no` hides the row from anonymous visitors the same way rated does. Rated PGNs omit the tag — owners-only is implied by `Rated=yes` ([stampOpenChallengePgn](./src/federation.js#L1831)).
+**Who can see / join.** Every open seek is wiki-owners only ([challengeJoinGate](./src/federation.js) / [challengeVisibleToViewer](./src/federation.js)). Anonymous visitors do not see joinable rows. Directed invites additionally require the viewer to be signed in on the `ChallengeTarget` wiki.
 
-**Page-backed vs ghost.** [finishOpenChallenge](./src/game.js#L2945) keeps the seek on the **current named page** when the viewer is not in a create-preview / ghost context. [isOpenChallengeGhostPage](./src/game.js#L2904) delegates only to [isOpenChallengeCreatePreviewContext](./src/federation.js#L2735) (`createPreviewPendingJournal` / `openChallengeSetupPending` / `wikiGhostPage`) — a bare wiki embed `pageKey` is not treated as a ghost. Survey-origin and create-preview posts still use pending metadata + join ghosts ([openChallengeUsesJoinGhost](./src/federation.js#L2744)).
+**Page-backed vs ghost.** [finishOpenChallenge](./src/game.js) keeps the seek on the **current named page** when the viewer is not in a create-preview / ghost context. [isOpenChallengeGhostPage](./src/game.js) delegates only to [isOpenChallengeCreatePreviewContext](./src/federation.js) (`createPreviewPendingJournal` / `openChallengeSetupPending` / `wikiGhostPage`) — a bare wiki embed `pageKey` is not treated as a ghost. Survey-origin and create-preview posts still use pending metadata + join ghosts ([openChallengeUsesJoinGhost](./src/federation.js)).
 
-**Guest join identity.** Unauthenticated joiners are seated as plain `Guest` ([GUEST_PLAYER_NAME](./src/chess-core.js#L2804)). [resolveJoinerSeatId](./src/federation.js#L5086) must **not** wrap them with the public site `ownerName` — only authenticated owners get the federated `host (name)` seat id. After sign-in, [upgradeGuestSeatTagsToWikiIdentity](./src/chess-core.js#L2826) can rewrite that plain Guest tag to a wiki seat.
+**Join identity.** Accepting seats a signed-in owner as federated `host (name)` ([resolveJoinerSeatId](./src/federation.js)). Same-device pass-and-play can still use a plain local guest name; that path is not a federation open seek.
 
-**SURVEY item index.** Authoritative open challenges for a site are also indexed on the SURVEY chess item as an `openChallenges` array ([openChallengeSurveyRecord](./src/federation.js#L2659), [applyOpenChallengeSurveyEdit](./src/federation.js#L2719)). Each record holds `{ itemId, pgn, title, challenge }`. [harvestSurveyOpenChallenges](./src/federation.js#L2693) reads them during crawl; [foreignOpenChallengeItemIds](./src/federation.js#L2679) drops stale fork copies whose creator is another wiki.
+**Page-charm index.** Authoritative open challenges for a site live on the My Chess Games page charm as `page.chess.openChallenges` ([openChallengeSurveyRecord](./src/federation.js#L2811), [syncOpenChallengeSurveyOnPage](./src/federation.js#L5345)) — journal-free, so posting/canceling a seek does not bloat the SURVEY item. Each record holds `{ itemId, pgn, title, challenge }` (plus `slug` for page-backed seeks). [harvestSurveyOpenChallenges](./src/federation.js#L2881) reads them during crawl; [foreignOpenChallengeItemIds](./src/federation.js#L2868) drops stale fork copies whose creator is another wiki. Older pages that still carry seeks on the SURVEY item are read until the next charm write migrates them.
 
-**Accept flow.** Accepting a challenge is a normal seat-fill edit that materializes join ghosts through the journal gateway (federation.js §4, chess.js challenge handlers). Open seeks render on the My Chess Games / site-survey surface in [survey.js](./src/survey.js) (not a separate `#challenges` page).
+**Discovery seeds.** Federation open-challenge crawls fetch each seed’s `my-chess-games` only (progressive `partial` replies). [buildFetchTargets](./src/federation.js#L1441) / [resolveFetchSeeds](./src/federation.js#L3171) order hosts as: **local → past opponents → curated neighbourhood → local-farm peers → IndexedDB `federationSites` / global plugin index**. Local-farm peers come from wiki-plugin-present (`GET /plugin/present/roll`) via browser-only [fetchFarmPeerSites](./src/federation.js#L3117) / [parsePresentRollSites](./src/federation.js#L3110) — soft-fails to `[]` when present is not installed. The client ([survey.js](./src/survey.js) deferred work, [chess.js](./src/chess.js) shell seeds, [leaderboard.js](./src/leaderboard.js) neighbourhood cache) passes `farmPeerSites` into `BUILD_CHALLENGES` / neighborhood jobs; [pwa-bridge.js](./server/pwa-bridge.js) forwards that list and does **not** re-discover peers itself. Challenge discovery uses `deferIndex` so the first wave never waits on the global plugin index; [refreshFederationSitesFromIndex](./src/federation.js#L3240) warms that cache in the background.
+
+**Accept flow.** Accepting a challenge is a normal seat-fill edit that materializes join ghosts through the journal gateway (federation.js §4, chess.js challenge handlers). When the challenge becomes active (or is canceled), the shell retires the survey seek via `CHALLENGE_CHANGED` → [publishOpenChallengeSurveyDelta](./src/chess.js) remove. Site survey also drops seeks whose page game already has both seats filled ([filterOpenChallengesStillSeeking](./src/federation.js#L715)). Open seeks render on the My Chess Games / site-survey surface in [survey.js](./src/survey.js) (not a separate `#challenges` page).
 
 ### Lifecycle: first game → twin audit → leaderboard
 
@@ -697,13 +702,13 @@ Open seeks are **real game pages** with one open seat — not extra chess items 
 
 ### When there is no iframe parent
 
-An installed PWA opens `client/index.html` without a wiki parent window. `postMessage` to a parent is impossible; journal writes and federation reads go through **HTTP** routes on `/plugin/chess/pwa/*`.
+An installed PWA — or a plain browser tab at `/plugins/chess/` — opens `client/index.html` without a wiki parent or opener. `postMessage` to a shell is impossible; journal writes and federation reads go through **same-origin HTTP** routes on `/plugin/chess/pwa/*`. The app sets [`pwaBridgeActive = !wikiFrame`](./src/chess-app.js#L1536) so one wiki owner cookie covers the wiki embed, the installed app, and that direct tab.
 
-[server/pwa-bridge.js](./server/pwa-bridge.js) implements those routes with the same reducers as the shell. [board-layout.js: bridgeFetch](./src/board-layout.js#L2974) is the browser-side fetch wrapper.
+[server/pwa-bridge.js](./server/pwa-bridge.js) implements those routes with the same reducers as the shell (no credentialed cross-origin CORS — relative [`PWA_BRIDGE_BASE`](./src/board-layout.js#L28) only). [board-layout.js: bridgeFetch](./src/board-layout.js#L2971) is the browser-side fetch wrapper.
 
 ### Local-only halo
 
-Unsigned or offline sessions show a yellow **local-only halo** via [showLocalOnlyHalo](./src/board-layout.js#L3247). [localSessionUiPolicy](./src/chess-core.js#L3273) derives UI flags: what saves are allowed, how page chrome behaves, whether federation buttons appear.
+Unsigned or offline sessions show a yellow **local-only halo** via [showLocalOnlyHalo](./src/board-layout.js#L3246). [localSessionUiPolicy](./src/chess-core.js#L3273) derives UI flags: what saves are allowed, how page chrome behaves, whether federation buttons appear.
 
 This prevents users from believing unsigned PWA edits replicated to their wiki when they did not.
 
@@ -717,11 +722,11 @@ This prevents users from believing unsigned PWA edits replicated to their wiki w
 | Engine / puzzle play | Full                                     | Full (offline puzzle DB if downloaded) |
 | Page chrome          | Wiki host in title bar                   | Generic / local branding               |
 
-Sign-in flow: authenticate on the wiki (claim / security dialog via `wiki.requestSignIn` in the embed, or a normal wiki tab for the installed app) → bridge [GET /session](./server/pwa-bridge.js#L905) confirms host binding. The installed app re-checks session on focus via [refreshPwaSessionFromBridge](./src/chess-app.js#L2346) / [wirePwaAuthLock](./src/chess-app.js#L2389).
+Sign-in flow: authenticate on the wiki (claim / security dialog via `wiki.requestSignIn` in the embed, or a normal wiki tab) → bridge [GET /session](./server/pwa-bridge.js#L930) confirms host binding. Shell-less surfaces re-check session on focus via [refreshPwaSessionFromBridge](./src/chess-app.js#L2259) / [wirePwaAuthLock](./src/chess-app.js#L2302).
 
 ### HTTP bridge routes (overview)
 
-Routes register in [createPwaBridgeRouter](./server/pwa-bridge.js#L893) under `/plugin/chess/pwa/` (base from [PWA_BRIDGE_BASE](./src/board-layout.js#L28)):
+Routes register in [createPwaBridgeRouter](./server/pwa-bridge.js#L896) under `/plugin/chess/pwa/` (base from [PWA_BRIDGE_BASE](./src/board-layout.js#L28)):
 
 | Route             | Method   | Purpose                                                                  |
 | ----------------- | -------- | ------------------------------------------------------------------------ |
@@ -735,9 +740,9 @@ Routes register in [createPwaBridgeRouter](./server/pwa-bridge.js#L893) under `/
 | `/game-state`     | GET      | Poll remote fork state                                                   |
 | `/dispatch`       | POST     | Generic action relay (same federation jobs as shell MSG)                 |
 
-Browser-side entry: [bridgeFetch](./src/board-layout.js#L2974) in board-layout §4.
+Browser-side entry: [bridgeFetch](./src/board-layout.js#L2971) in board-layout §4.
 
-Federation crawl requests from the installed app reuse [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6303) and forward [federationIndexedDbOptsFromPayload](./server/pwa-bridge.js#L48) so blocked sites stay blocked offline as well as in the wiki embed.
+Federation crawl requests from the installed app reuse [orchestrateSiteSurveyDeferredWork](./src/federation.js#L6660) and forward [federationIndexedDbOptsFromPayload](./server/pwa-bridge.js#L48) so blocked sites stay blocked offline as well as in the wiki embed. Client-supplied `farmPeerSites` are forwarded the same way — the bridge does not call present’s roll endpoint.
 
 ### PWA client surface
 
@@ -755,9 +760,9 @@ Bridge URL, install nudge, and session fetch live in [board-layout.js §4](./src
 
 ### Signed-in vs unsigned PWA
 
-When the user signs in on their wiki, the installed app picks up credentials through [GET /session](./server/pwa-bridge.js#L905) (re-checked on focus). Journal writes then target their site. Unsigned sessions still allow local study (puzzles, engine games) but show the local-only halo and block federation features that require a host.
+When the user signs in on their wiki, shell-less chess surfaces pick up credentials through [GET /session](./server/pwa-bridge.js#L930) (re-checked on focus). Journal writes then target their site. Unsigned sessions still allow local study (puzzles, engine games) but show the local-only halo and block federation features that require a host.
 
-[chess-app.js §3 Auth lock & viewer context](./src/chess-app.js#L1729) coordinates with wiki footer lock semantics — popup and PWA surfaces without the wiki chrome use different auth gating than the embed.
+[chess-app.js](./src/chess-app.js#L2042) coordinates with wiki footer lock semantics — popup and shell-less surfaces without the wiki chrome use the chess padlock (open = signed-in owner) instead of the wiki footer lock.
 
 ### Service worker scope
 
@@ -802,20 +807,20 @@ Active filters appear in the puzzle header ([formatPuzzleFiltersLabel](./src/che
 
 | Module               | ~LOC | Edit when…                                                                   |
 | -------------------- | ---- | ---------------------------------------------------------------------------- |
-| chess.js             | 5310 | iframe embed, journal gateway, shell fetch                                   |
-| chess-app.js         | 4570 | boot, view router, auth/PWA, journal gateway, init hosts                     |
-| game.js              | 4190 | GAME console, seats, start-game modal, player bars, challenges               |
-| chess-core.js        | 5280 | parsing, keywords, MSG, pure sync policy; `ChessRules` / `Paste` / `Journal` |
-| federation.js        | 7200 | Glicko, crawl, site-survey deferred orchestration, charm/gossip page ops     |
-| survey.js            | 3570 | IndexedDB ratings, site-survey / open-challenge UI, shared browse shell      |
-| leaderboard.js       | 1270 | federated leaderboard gate, hop dials, ranking table                         |
-| puzzle.js            | 3680 | puzzle solver, bulk CSV, offline download                                    |
+| chess.js             | 5470 | iframe embed, journal gateway, shell fetch                                   |
+| chess-app.js         | 4500 | boot, view router, auth/PWA, journal gateway, init hosts                     |
+| game.js              | 4240 | GAME console, seats, start-game modal, player bars, challenges               |
+| chess-core.js        | 5310 | parsing, keywords, MSG, pure sync policy; `ChessRules` / `Paste` / `Journal` |
+| federation.js        | 7440 | Glicko, crawl, site-survey deferred orchestration, charm/gossip page ops     |
+| survey.js            | 3640 | IndexedDB ratings, site-survey / open-challenge UI, shared browse shell      |
+| leaderboard.js       | 1370 | federated leaderboard gate, hop dials, ranking table                         |
+| puzzle.js            | 3730 | puzzle solver, bulk CSV, offline download                                    |
 | board-layout.js      | 3390 | layout, PWA protocol, wiki transport (`PWA` / `Transport`)                   |
 | realtime.js          | 1330 | remote poll, WebRTC, applySyncedPosition                                     |
 | choose-menu.js       | 540  | CHOOSE start menu                                                            |
 | position.js          | 250  | POSITION FEN editor board, save/flip                                         |
-| modals.js            | 1750 | shared dialogs                                                               |
-| cm-modules-bundle.js | 1460 | chess-console / Stockfish glue                                               |
+| modals.js            | 1790 | shared dialogs                                                               |
+| cm-modules-bundle.js | 1470 | chess-console / Stockfish glue                                               |
 | glicko-worker.js     | 50   | worker entry for timeline replay                                             |
 
 Line counts are total file lines (rounded); refresh when a module shifts by more than ~50 lines. Federation crawl is an opponent-graph BFS filtered by local `blockList` (plus non-expanding federation-search leaves on hop-bounded surveys); gossip stays `checkpoint` + `trustedPeers` only — expect `federation.js` / `survey.js` to change when crawl or IndexedDB meta evolves, not when gossip schema grows.
